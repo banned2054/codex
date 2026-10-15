@@ -419,8 +419,49 @@ fn zero_guid() -> GUID {
 #[cfg(test)]
 mod tests {
     use super::FILTER_SPECS;
+    use super::filter_specs::ConditionSpec;
     use pretty_assertions::assert_eq;
     use std::collections::BTreeSet;
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+    use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_LAYER_ALE_AUTH_CONNECT_V6;
+    use windows_sys::Win32::Networking::WinSock::IPPROTO_TCP;
+    use windows_sys::Win32::Networking::WinSock::IPPROTO_UDP;
+    use windows_sys::core::GUID;
+
+    fn guid_tuple(guid: &GUID) -> (u32, u16, u16, [u8; 8]) {
+        (guid.data1, guid.data2, guid.data3, guid.data4)
+    }
+
+    fn assert_transport_filter(name: &str, protocol: u8) {
+        let matching = FILTER_SPECS
+            .iter()
+            .filter(|spec| spec.name.starts_with(name))
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 2);
+
+        let layers = matching
+            .iter()
+            .map(|spec| guid_tuple(&spec.layer_key))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(layers.len(), 2);
+        assert!(layers.contains(&guid_tuple(&FWPM_LAYER_ALE_AUTH_CONNECT_V4)));
+        assert!(layers.contains(&guid_tuple(&FWPM_LAYER_ALE_AUTH_CONNECT_V6)));
+
+        for spec in matching {
+            assert_eq!(spec.conditions.len(), 2);
+            assert!(matches!(spec.conditions[0], ConditionSpec::User));
+            assert!(matches!(
+                spec.conditions[1],
+                ConditionSpec::Protocol(value) if value == protocol
+            ));
+        }
+    }
+
+    #[test]
+    fn generic_outbound_transport_filters_cover_tcp_udp_and_both_families() {
+        assert_transport_filter("tinyharness_wfp_tcp_connect_", IPPROTO_TCP as u8);
+        assert_transport_filter("tinyharness_wfp_udp_connect_", IPPROTO_UDP as u8);
+    }
 
     #[test]
     fn filter_keys_are_unique() {
