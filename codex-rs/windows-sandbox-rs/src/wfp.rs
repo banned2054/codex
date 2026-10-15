@@ -64,17 +64,15 @@ use filter_specs::ConditionSpec;
 use filter_specs::FILTER_SPECS;
 use filter_specs::FilterSpec;
 
-const SESSION_NAME: &str = "Codex Windows Sandbox WFP";
-const PROVIDER_NAME: &str = "Codex Windows Sandbox WFP";
-const PROVIDER_DESCRIPTION: &str = "Persistent WFP provider for Codex Windows sandbox filters";
-const SUBLAYER_NAME: &str = "Codex Windows Sandbox WFP";
-const SUBLAYER_DESCRIPTION: &str = "Persistent WFP sublayer for Codex Windows sandbox filters";
-
-// WFP identifies persistent providers, sublayers, and filters by stable GUIDs.
-// These values are Codex-owned identities; do not regenerate them unless we
-// intentionally want to orphan old objects and create a new WFP namespace.
-const PROVIDER_KEY: GUID = GUID::from_u128(0x2e31d31c_3948_4753_9117_e5d1a6496f41);
-const SUBLAYER_KEY: GUID = GUID::from_u128(0xe65054fd_4d32_4c7c_95ef_621f0cf6431a);
+// WFP object names and keys are TinyHarness-owned identities defined in
+// branding; see that module for why they must not collide with Codex's.
+const SESSION_NAME: &str = crate::branding::WFP_SESSION_NAME;
+const PROVIDER_NAME: &str = crate::branding::WFP_PROVIDER_NAME;
+const PROVIDER_DESCRIPTION: &str = crate::branding::WFP_PROVIDER_DESCRIPTION;
+const SUBLAYER_NAME: &str = crate::branding::WFP_SUBLAYER_NAME;
+const SUBLAYER_DESCRIPTION: &str = crate::branding::WFP_SUBLAYER_DESCRIPTION;
+const PROVIDER_KEY: GUID = crate::branding::WFP_PROVIDER_KEY;
+const SUBLAYER_KEY: GUID = crate::branding::WFP_SUBLAYER_KEY;
 
 /// Installs the persistent Codex WFP filters for `account`.
 ///

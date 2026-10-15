@@ -275,7 +275,10 @@ pub(crate) fn log_error(event_id: u32, message: &str) {
 fn log_event(event_type: u16, event_id: u32, message: &str) {
     let source = SERVICE_STATE
         .get()
-        .map_or("CodexSandboxService", |state| state.service_name.as_str())
+        .map_or(
+            codex_windows_sandbox::branding::WINDOWS_SANDBOX_SERVICE_NAME,
+            |state| state.service_name.as_str(),
+        )
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();

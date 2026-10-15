@@ -2,6 +2,8 @@
 // from the eventual unsafe cleanup.
 #![allow(unsafe_op_in_unsafe_fn)]
 
+pub mod branding;
+
 #[cfg(any(target_os = "windows", test))]
 mod ssh_config_dependencies;
 
