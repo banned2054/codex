@@ -349,7 +349,8 @@ pub(crate) fn validate_target(
     }
     ensure!(
         sandbox_member,
-        "runtime account is not in CodexSandboxUsers"
+        "runtime account is not in {}",
+        codex_windows_sandbox::branding::SANDBOX_USERS_GROUP
     );
     Ok(user_sid)
 }

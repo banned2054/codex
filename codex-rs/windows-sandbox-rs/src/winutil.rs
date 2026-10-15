@@ -26,8 +26,8 @@ use windows_sys::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_FROM_SYSTEM;
 use windows_sys::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_IGNORE_INSERTS;
 use windows_sys::Win32::System::Diagnostics::Debug::FormatMessageW;
 
-pub const SANDBOX_USERS_GROUP: &str = "CodexSandboxUsers";
-const SANDBOX_USERS_GROUP_COMMENT: &str = "Codex sandbox internal group (managed)";
+pub use crate::branding::SANDBOX_USERS_GROUP;
+pub use crate::branding::SANDBOX_USERS_GROUP_COMMENT;
 
 pub fn to_wide<S: AsRef<OsStr>>(s: S) -> Vec<u16> {
     let mut v: Vec<u16> = s.as_ref().encode_wide().collect();

@@ -1,3 +1,4 @@
+use crate::branding::READ_ACL_MUTEX_NAME;
 use crate::to_wide;
 use anyhow::Result;
 use std::ffi::OsStr;
@@ -10,8 +11,6 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::System::Threading::MUTEX_ALL_ACCESS;
 use windows_sys::Win32::System::Threading::OpenMutexW;
 use windows_sys::Win32::System::Threading::ReleaseMutex;
-
-const READ_ACL_MUTEX_NAME: &str = "Local\\CodexSandboxReadAcl";
 
 pub(super) struct ReadAclMutexGuard {
     handle: HANDLE,
