@@ -30,21 +30,17 @@ use windows::core::Interface;
 use crate::SetupErrorCode;
 use crate::SetupFailure;
 
-// This is the stable identifier we use to find/update the rule idempotently.
-// It intentionally does not change between installs.
-const OFFLINE_BLOCK_RULE_NAME: &str = "codex_sandbox_offline_block_outbound";
-const OFFLINE_BLOCK_INBOUND_RULE_NAME: &str = "codex_sandbox_offline_block_inbound";
-const OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME: &str = "codex_sandbox_offline_block_loopback_tcp";
-const OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME: &str = "codex_sandbox_offline_block_loopback_udp";
-
-// Friendly text shown in the firewall UI.
-const OFFLINE_BLOCK_RULE_FRIENDLY: &str = "Codex Sandbox Offline - Block Non-Loopback Outbound";
-const OFFLINE_BLOCK_INBOUND_RULE_FRIENDLY: &str =
-    "Codex Sandbox Offline - Block Non-Loopback Inbound";
-const OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY: &str =
-    "Codex Sandbox Offline - Block Loopback TCP (Except Proxy)";
-const OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY: &str = "Codex Sandbox Offline - Block Loopback UDP";
-const OFFLINE_PROXY_ALLOW_RULE_NAME: &str = "codex_sandbox_offline_allow_loopback_proxy";
+// These are the stable identifiers we use to find/update the rule idempotently.
+// They intentionally do not change between installs of this fork; see branding.
+pub use crate::branding::OFFLINE_BLOCK_INBOUND_RULE_FRIENDLY;
+pub use crate::branding::OFFLINE_BLOCK_INBOUND_RULE_NAME;
+pub use crate::branding::OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY;
+pub use crate::branding::OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME;
+pub use crate::branding::OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY;
+pub use crate::branding::OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME;
+pub use crate::branding::OFFLINE_BLOCK_RULE_FRIENDLY;
+pub use crate::branding::OFFLINE_BLOCK_RULE_NAME;
+pub use crate::branding::OFFLINE_PROXY_ALLOW_RULE_NAME;
 const LOOPBACK_REMOTE_ADDRESSES: &str = "127.0.0.0/8,::/127";
 const NON_LOOPBACK_REMOTE_ADDRESSES: &str = "0.0.0.0-126.255.255.255,128.0.0.0-255.255.255.255,::,::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
 

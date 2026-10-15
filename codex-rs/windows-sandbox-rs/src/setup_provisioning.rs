@@ -1235,6 +1235,8 @@ mod tests {
     use super::WRITE_ROOT_ALLOW_MASK;
     use super::convert_string_sid_to_sid;
     use super::workspace_write_cap_sids_for_path;
+    use crate::branding::OFFLINE_USERNAME;
+    use crate::branding::ONLINE_USERNAME;
     use crate::ensure_allow_mask_aces;
     use crate::ensure_allow_write_aces;
     use crate::load_or_create_cap_sids;
@@ -1252,8 +1254,8 @@ mod tests {
     pub(super) fn payload_json() -> serde_json::Value {
         json!({
             "version": SETUP_VERSION,
-            "offline_username": "CodexSandboxOffline",
-            "online_username": "CodexSandboxOnline",
+            "offline_username": OFFLINE_USERNAME,
+            "online_username": ONLINE_USERNAME,
             "codex_home": "C:\\codex-home",
             "command_cwd": "C:\\workspace",
             "read_roots": [],

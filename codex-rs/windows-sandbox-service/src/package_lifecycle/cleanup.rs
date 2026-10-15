@@ -91,7 +91,7 @@ pub(super) fn clean_up(
                     // Retained data must not keep permissions for the deleted sandbox group.
                     record_result(
                         "remove codex home sandbox permissions",
-                        resolve_sid("CodexSandboxUsers")
+                        resolve_sid(codex_windows_sandbox::branding::SANDBOX_USERS_GROUP)
                             .and_then(|mut sid| unsafe {
                                 revoke_ace(home, sid.as_mut_ptr().cast())
                             })
