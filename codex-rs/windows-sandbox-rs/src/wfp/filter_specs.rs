@@ -4,6 +4,8 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_LAYER_
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V6;
 use windows_sys::Win32::Networking::WinSock::IPPROTO_ICMP;
 use windows_sys::Win32::Networking::WinSock::IPPROTO_ICMPV6;
+use windows_sys::Win32::Networking::WinSock::IPPROTO_TCP;
+use windows_sys::Win32::Networking::WinSock::IPPROTO_UDP;
 use windows_sys::core::GUID;
 
 #[derive(Clone, Copy)]
@@ -122,5 +124,45 @@ pub(super) const FILTER_SPECS: &[FilterSpec] = &[
         description: "Block sandbox-account SMB port 139 v6",
         layer_key: FWPM_LAYER_ALE_AUTH_CONNECT_V6,
         conditions: &[ConditionSpec::User, ConditionSpec::RemotePort(139)],
+    },
+    FilterSpec {
+        key: crate::branding::WFP_FILTER_TCP_CONNECT_V4_KEY,
+        name: "tinyharness_wfp_tcp_connect_v4",
+        description: "Block sandbox-account outbound TCP v4",
+        layer_key: FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+        conditions: &[
+            ConditionSpec::User,
+            ConditionSpec::Protocol(IPPROTO_TCP as u8),
+        ],
+    },
+    FilterSpec {
+        key: crate::branding::WFP_FILTER_TCP_CONNECT_V6_KEY,
+        name: "tinyharness_wfp_tcp_connect_v6",
+        description: "Block sandbox-account outbound TCP v6",
+        layer_key: FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        conditions: &[
+            ConditionSpec::User,
+            ConditionSpec::Protocol(IPPROTO_TCP as u8),
+        ],
+    },
+    FilterSpec {
+        key: crate::branding::WFP_FILTER_UDP_CONNECT_V4_KEY,
+        name: "tinyharness_wfp_udp_connect_v4",
+        description: "Block sandbox-account outbound UDP v4",
+        layer_key: FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+        conditions: &[
+            ConditionSpec::User,
+            ConditionSpec::Protocol(IPPROTO_UDP as u8),
+        ],
+    },
+    FilterSpec {
+        key: crate::branding::WFP_FILTER_UDP_CONNECT_V6_KEY,
+        name: "tinyharness_wfp_udp_connect_v6",
+        description: "Block sandbox-account outbound UDP v6",
+        layer_key: FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        conditions: &[
+            ConditionSpec::User,
+            ConditionSpec::Protocol(IPPROTO_UDP as u8),
+        ],
     },
 ];
