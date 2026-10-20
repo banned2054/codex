@@ -87,6 +87,7 @@ pub fn ensure_offline_proxy_allowlist(
     offline_sid: &str,
     proxy_ports: &[u16],
     allow_local_binding: bool,
+    allow_tcp_loopback: bool,
     log: &mut dyn Write,
 ) -> Result<()> {
     let local_user_spec = format!("O:LSD:(A;;CC;;;{offline_sid})");
@@ -113,16 +114,31 @@ pub fn ensure_offline_proxy_allowlist(
             if allow_local_binding {
                 // Remove the legacy overlapping allow rule before returning to the local-binding
                 // mode so stale proxy exceptions do not linger.
-                remove_rule_if_present(&rules, OFFLINE_PROXY_ALLOW_RULE_NAME, log)?;
-                remove_rule_if_present(&rules, OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME, log)?;
-                remove_rule_if_present(&rules, OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME, log)?;
+                remove_rule_if_present(
+                    &rules,
+                    &scoped_rule_name(OFFLINE_PROXY_ALLOW_RULE_NAME, allow_tcp_loopback),
+                    log,
+                )?;
+                remove_rule_if_present(
+                    &rules,
+                    &scoped_rule_name(OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME, allow_tcp_loopback),
+                    log,
+                )?;
+                remove_rule_if_present(
+                    &rules,
+                    &scoped_rule_name(OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME, allow_tcp_loopback),
+                    log,
+                )?;
                 return Ok(());
             }
 
             ensure_block_rule(
                 &rules,
                 &BlockRuleSpec {
-                    internal_name: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
+                    internal_name: &scoped_rule_name(
+                        OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
+                        allow_tcp_loopback,
+                    ),
                     friendly_desc: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY,
                     direction: NET_FW_RULE_DIR_OUT,
                     protocol: NET_FW_IP_PROTOCOL_UDP.0,
@@ -134,12 +150,29 @@ pub fn ensure_offline_proxy_allowlist(
                 log,
             )?;
 
+            if allow_tcp_loopback {
+                remove_rule_if_present(
+                    &rules,
+                    &scoped_rule_name(OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME, true),
+                    log,
+                )?;
+                remove_rule_if_present(
+                    &rules,
+                    &scoped_rule_name(OFFLINE_PROXY_ALLOW_RULE_NAME, true),
+                    log,
+                )?;
+                return Ok(());
+            }
+
             // Install a broad TCP loopback block before narrowing it to the allowed proxy port
             // complement. If the narrowing update fails, the sandbox remains fail-closed.
             ensure_block_rule(
                 &rules,
                 &BlockRuleSpec {
-                    internal_name: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+                    internal_name: &scoped_rule_name(
+                        OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+                        allow_tcp_loopback,
+                    ),
                     friendly_desc: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
                     direction: NET_FW_RULE_DIR_OUT,
                     protocol: NET_FW_IP_PROTOCOL_TCP.0,
@@ -153,13 +186,20 @@ pub fn ensure_offline_proxy_allowlist(
 
             // Remove the legacy overlapping allow rule only after the explicit block rules are in
             // place so transitions back to proxy-only mode do not fail open.
-            remove_rule_if_present(&rules, OFFLINE_PROXY_ALLOW_RULE_NAME, log)?;
+            remove_rule_if_present(
+                &rules,
+                &scoped_rule_name(OFFLINE_PROXY_ALLOW_RULE_NAME, allow_tcp_loopback),
+                log,
+            )?;
 
             if let Some(blocked_remote_ports) = blocked_loopback_tcp_remote_ports(proxy_ports) {
                 ensure_block_rule(
                     &rules,
                     &BlockRuleSpec {
-                        internal_name: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+                        internal_name: &scoped_rule_name(
+                            OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+                            allow_tcp_loopback,
+                        ),
                         friendly_desc: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
                         direction: NET_FW_RULE_DIR_OUT,
                         protocol: NET_FW_IP_PROTOCOL_TCP.0,
@@ -176,7 +216,11 @@ pub fn ensure_offline_proxy_allowlist(
     }
 }
 
-pub fn ensure_offline_network_blocks(offline_sid: &str, log: &mut dyn Write) -> Result<()> {
+pub fn ensure_offline_network_blocks(
+    offline_sid: &str,
+    allow_tcp_loopback: bool,
+    log: &mut dyn Write,
+) -> Result<()> {
     let local_user_spec = format!("O:LSD:(A;;CC;;;{offline_sid})");
 
     let _apartment = FirewallComApartment::initialize()?;
@@ -202,7 +246,7 @@ pub fn ensure_offline_network_blocks(offline_sid: &str, log: &mut dyn Write) -> 
             ensure_block_rule(
                 &rules,
                 &BlockRuleSpec {
-                    internal_name: OFFLINE_BLOCK_RULE_NAME,
+                    internal_name: &scoped_rule_name(OFFLINE_BLOCK_RULE_NAME, allow_tcp_loopback),
                     friendly_desc: OFFLINE_BLOCK_RULE_FRIENDLY,
                     direction: NET_FW_RULE_DIR_OUT,
                     protocol: NET_FW_IP_PROTOCOL_ANY.0,
@@ -216,7 +260,10 @@ pub fn ensure_offline_network_blocks(offline_sid: &str, log: &mut dyn Write) -> 
             ensure_block_rule(
                 &rules,
                 &BlockRuleSpec {
-                    internal_name: OFFLINE_BLOCK_INBOUND_RULE_NAME,
+                    internal_name: &scoped_rule_name(
+                        OFFLINE_BLOCK_INBOUND_RULE_NAME,
+                        allow_tcp_loopback,
+                    ),
                     friendly_desc: OFFLINE_BLOCK_INBOUND_RULE_FRIENDLY,
                     direction: NET_FW_RULE_DIR_IN,
                     protocol: NET_FW_IP_PROTOCOL_ANY.0,
@@ -635,5 +682,13 @@ mod tests {
             failure.code,
             SetupErrorCode::HelperFirewallPolicyIneffective
         );
+    }
+}
+
+fn scoped_rule_name(base: &str, allow_tcp_loopback: bool) -> String {
+    if allow_tcp_loopback {
+        format!("{base}_tcp_loopback")
+    } else {
+        base.to_owned()
     }
 }

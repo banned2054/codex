@@ -13,6 +13,9 @@ pub(super) enum ConditionSpec {
     User,
     Protocol(u8),
     RemotePort(u16),
+    NonLoopbackV4Low,
+    NonLoopbackV4High,
+    NonLoopbackV6,
 }
 
 #[derive(Clone, Copy)]
@@ -166,3 +169,109 @@ pub(super) const FILTER_SPECS: &[FilterSpec] = &[
         ],
     },
 ];
+
+// 独立模式使用独立 key，安装时绝不删除或重绑定严格模式的过滤器。
+const TCP_LOOPBACK_IDENTITIES: &[(GUID, &str)] = &[
+    (
+        GUID::from_u128(0x0712b4aac7cd5003b75498a871bf12f2),
+        "tinyharness_tcp_loopback_wfp_icmp_connect_v4",
+    ),
+    (
+        GUID::from_u128(0x2f92b9de699e55d98393a15839b85d40),
+        "tinyharness_tcp_loopback_wfp_icmp_connect_v6",
+    ),
+    (
+        GUID::from_u128(0xac1b1bda91a758ddbcd96356070e3ac1),
+        "tinyharness_tcp_loopback_wfp_icmp_assign_v4",
+    ),
+    (
+        GUID::from_u128(0x337435949c7755778c3d74d0f30b0a03),
+        "tinyharness_tcp_loopback_wfp_icmp_assign_v6",
+    ),
+    (
+        GUID::from_u128(0x26d305caeb615c1abed94d13c333f270),
+        "tinyharness_tcp_loopback_wfp_dns_53_v4",
+    ),
+    (
+        GUID::from_u128(0x834984854b8153a0a7dc5bd6399a89b7),
+        "tinyharness_tcp_loopback_wfp_dns_53_v6",
+    ),
+    (
+        GUID::from_u128(0x311876b5667e56d6b1f9dbba1a59d959),
+        "tinyharness_tcp_loopback_wfp_dns_853_v4",
+    ),
+    (
+        GUID::from_u128(0x633a2654d3a35cdc9fdea150c4f945d5),
+        "tinyharness_tcp_loopback_wfp_dns_853_v6",
+    ),
+    (
+        GUID::from_u128(0x4b7749ad19c558aca41c95c84831c7f0),
+        "tinyharness_tcp_loopback_wfp_smb_445_v4",
+    ),
+    (
+        GUID::from_u128(0x3f708f48937d5264bff977a837eb008c),
+        "tinyharness_tcp_loopback_wfp_smb_445_v6",
+    ),
+    (
+        GUID::from_u128(0xaca327d4a9225d8f8d2b90094333651b),
+        "tinyharness_tcp_loopback_wfp_smb_139_v4",
+    ),
+    (
+        GUID::from_u128(0x69f257cdec9b5d50b8ff08f455db990d),
+        "tinyharness_tcp_loopback_wfp_smb_139_v6",
+    ),
+    (
+        GUID::from_u128(0xb4a0eab4cc9e5d3fbb32c6f9f9dedb5e),
+        "tinyharness_tcp_loopback_wfp_tcp_connect_v4",
+    ),
+    (
+        GUID::from_u128(0x5929687894a5521f8543e8bf2f2c8eaf),
+        "tinyharness_tcp_loopback_wfp_tcp_connect_v6",
+    ),
+    (
+        GUID::from_u128(0xd2a0f9b745915b6596bab093070d3b89),
+        "tinyharness_tcp_loopback_wfp_udp_connect_v4",
+    ),
+    (
+        GUID::from_u128(0x0aa310236626592983fa1fe685c70fbc),
+        "tinyharness_tcp_loopback_wfp_udp_connect_v6",
+    ),
+    (
+        GUID::from_u128(0xc1970aae0f4756079cf4581f347b2d97),
+        "tinyharness_tcp_loopback_wfp_tcp_connect_v4_high",
+    ),
+];
+
+pub(super) fn specs_for_mode(allow_tcp_loopback: bool) -> Vec<FilterSpec> {
+    if !allow_tcp_loopback {
+        return FILTER_SPECS.to_vec();
+    }
+    let mut result = Vec::new();
+    for (index, original) in FILTER_SPECS.iter().enumerate() {
+        let mut spec = *original;
+        (spec.key, spec.name) = TCP_LOOPBACK_IDENTITIES[index];
+        if original.name == "tinyharness_wfp_tcp_connect_v4" {
+            spec.conditions = &[
+                ConditionSpec::User,
+                ConditionSpec::Protocol(IPPROTO_TCP as u8),
+                ConditionSpec::NonLoopbackV4Low,
+            ];
+            let mut high = spec;
+            (high.key, high.name) = TCP_LOOPBACK_IDENTITIES[FILTER_SPECS.len()];
+            high.conditions = &[
+                ConditionSpec::User,
+                ConditionSpec::Protocol(IPPROTO_TCP as u8),
+                ConditionSpec::NonLoopbackV4High,
+            ];
+            result.push(high);
+        } else if original.name == "tinyharness_wfp_tcp_connect_v6" {
+            spec.conditions = &[
+                ConditionSpec::User,
+                ConditionSpec::Protocol(IPPROTO_TCP as u8),
+                ConditionSpec::NonLoopbackV6,
+            ];
+        }
+        result.push(spec);
+    }
+    result
+}

@@ -84,6 +84,7 @@ fn credential_setup_repairs_expired_accounts_once_and_reloads_credentials() -> R
             created_at: None,
             proxy_ports: vec![],
             allow_local_binding: false,
+            allow_tcp_loopback: false,
         };
         let mut users = SandboxUsersFile {
             version: SETUP_VERSION,
@@ -185,6 +186,7 @@ fn credential_setup_reconciles_policy_and_repairs_accounts() -> Result<()> {
             created_at: None,
             proxy_ports: vec![3128],
             allow_local_binding: stored_binding,
+            allow_tcp_loopback: false,
         };
         let user = SandboxUserRecord {
             username: marker.offline_username.clone(),

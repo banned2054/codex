@@ -445,6 +445,8 @@ pub struct SetupMarker {
     pub proxy_ports: Vec<u16>,
     #[serde(default)]
     pub allow_local_binding: bool,
+    #[serde(default)]
+    pub allow_tcp_loopback: bool,
 }
 
 impl SetupMarker {
@@ -2191,6 +2193,7 @@ mod tests {
             created_at: None,
             proxy_ports: vec![3128],
             allow_local_binding: false,
+            allow_tcp_loopback: false,
         };
         let desired = super::OfflineProxySettings {
             proxy_ports: vec![1081, 8080],
@@ -2212,6 +2215,7 @@ mod tests {
             created_at: None,
             proxy_ports: vec![3128],
             allow_local_binding: false,
+            allow_tcp_loopback: false,
         };
         let desired = super::OfflineProxySettings {
             proxy_ports: vec![1081, 8080],

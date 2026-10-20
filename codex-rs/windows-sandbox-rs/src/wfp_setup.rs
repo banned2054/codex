@@ -1,5 +1,5 @@
-use crate::install_wfp_filters_for_account;
 use crate::setup_error::sanitize_setup_metric_tag_value;
+use crate::wfp::install_wfp_filters_for_account_with_tcp_loopback;
 use anyhow::Result;
 use codex_otel::OtelExporter;
 use codex_otel::OtelProvider;
@@ -126,9 +126,10 @@ fn emit_wfp_setup_metric_safely<F>(
     }
 }
 
-pub fn install_wfp_filters<F>(
+pub fn install_wfp_filters_with_tcp_loopback<F>(
     codex_home: &Path,
     offline_username: &str,
+    allow_tcp_loopback: bool,
     otel: Option<&StatsigMetricsSettings>,
     mut log: F,
 ) -> Result<()>
@@ -136,7 +137,7 @@ where
     F: FnMut(&str),
 {
     let metric = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        install_wfp_filters_for_account(offline_username)
+        install_wfp_filters_for_account_with_tcp_loopback(offline_username, allow_tcp_loopback)
     })) {
         Ok(Ok(installed_filter_count)) => {
             log(&format!(
@@ -178,4 +179,16 @@ where
         Some(error) => Err(anyhow::anyhow!(error)),
         None => Ok(()),
     }
+}
+
+pub fn install_wfp_filters<F>(
+    codex_home: &Path,
+    offline_username: &str,
+    otel: Option<&StatsigMetricsSettings>,
+    log: F,
+) -> Result<()>
+where
+    F: FnMut(&str),
+{
+    install_wfp_filters_with_tcp_loopback(codex_home, offline_username, false, otel, log)
 }

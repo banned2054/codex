@@ -18,6 +18,9 @@ use windows_sys::core::GUID;
 // Local accounts. SAM account names are limited to 20 characters.
 pub const OFFLINE_USERNAME: &str = "TinyHarnessOffline";
 pub const ONLINE_USERNAME: &str = "TinyHarnessOnline";
+pub const TCP_LOOPBACK_OFFLINE_USERNAME: &str = "TinyHarnessTcpOff";
+pub const TCP_LOOPBACK_ONLINE_USERNAME: &str = "TinyHarnessTcpOn";
+pub const TCP_LOOPBACK_SETUP_VERSION: u32 = 6;
 pub const SANDBOX_USERS_GROUP: &str = "TinyHarnessUsers";
 pub const SANDBOX_USERS_GROUP_COMMENT: &str = "TinyHarness sandbox internal group (managed)";
 

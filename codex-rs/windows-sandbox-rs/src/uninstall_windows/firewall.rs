@@ -23,8 +23,12 @@ pub(super) fn cleanup_firewall_rules() -> Result<()> {
         crate::branding::OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
         crate::branding::OFFLINE_PROXY_ALLOW_RULE_NAME,
     ] {
-        if let Err(error) = unsafe { rules.Remove(&BSTR::from(name)) } {
-            errors.push(format!("remove sandbox firewall rule {name}: {error}"));
+        for scoped_name in [name.to_owned(), format!("{name}_tcp_loopback")] {
+            if let Err(error) = unsafe { rules.Remove(&BSTR::from(scoped_name.as_str())) } {
+                errors.push(format!(
+                    "remove sandbox firewall rule {scoped_name}: {error}"
+                ));
+            }
         }
     }
     if errors.is_empty() {

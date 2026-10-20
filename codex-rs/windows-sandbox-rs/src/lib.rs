@@ -509,6 +509,7 @@ pub use uninstall_windows::prepare_packaged_windows_sandbox_cleanup_with_retaine
 pub use wfp::install_wfp_filters_for_account;
 #[cfg(target_os = "windows")]
 pub use wfp_setup::install_wfp_filters;
+pub use wfp_setup::install_wfp_filters_with_tcp_loopback;
 #[cfg(target_os = "windows")]
 pub use windows_impl::CaptureResult;
 #[cfg(target_os = "windows")]

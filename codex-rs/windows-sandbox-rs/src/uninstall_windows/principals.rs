@@ -35,7 +35,12 @@ struct SandboxUser {
 
 impl DisabledSandboxUsers {
     pub(super) fn disable(&mut self) -> Result<()> {
-        for name in [OFFLINE_USERNAME, ONLINE_USERNAME] {
+        for name in [
+            OFFLINE_USERNAME,
+            ONLINE_USERNAME,
+            crate::branding::TCP_LOOPBACK_OFFLINE_USERNAME,
+            crate::branding::TCP_LOOPBACK_ONLINE_USERNAME,
+        ] {
             let Some(original_flags) = local_user_flags(name)? else {
                 continue;
             };
@@ -56,7 +61,12 @@ impl DisabledSandboxUsers {
     }
 
     pub(super) fn validate_current(&self) -> Result<()> {
-        for name in [OFFLINE_USERNAME, ONLINE_USERNAME] {
+        for name in [
+            OFFLINE_USERNAME,
+            ONLINE_USERNAME,
+            crate::branding::TCP_LOOPBACK_OFFLINE_USERNAME,
+            crate::branding::TCP_LOOPBACK_ONLINE_USERNAME,
+        ] {
             let Some(flags) = local_user_flags(name)? else {
                 continue;
             };

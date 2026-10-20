@@ -32,6 +32,7 @@ pub fn provision_sandbox_in_process(
         deny_write_paths: Vec::new(),
         proxy_ports: settings.proxy_ports,
         allow_local_binding: settings.allow_local_binding,
+        allow_tcp_loopback: false,
         otel: codex_otel::global_statsig_metrics_settings(),
         real_user: real_user.to_string(),
         user_profile: None,
