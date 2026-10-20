@@ -552,6 +552,7 @@ mod tests {
             created_at: None,
             proxy_ports: vec![7890],
             allow_local_binding: true,
+            allow_tcp_loopback: false,
         };
         let env_map = HashMap::from([(
             "HTTP_PROXY".to_string(),
@@ -588,6 +589,7 @@ mod tests {
             created_at: None,
             proxy_ports: vec![3128, 8081],
             allow_local_binding: true,
+            allow_tcp_loopback: false,
         };
         let env_map = HashMap::new();
         let reconciled = desired_offline_proxy_settings(

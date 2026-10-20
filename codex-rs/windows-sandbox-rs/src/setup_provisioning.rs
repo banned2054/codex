@@ -20,7 +20,7 @@ use crate::ensure_allow_mask_aces_with_inheritance;
 use crate::ensure_allow_write_aces;
 use crate::extract_setup_failure;
 use crate::hide_newly_created_users;
-use crate::install_wfp_filters;
+use crate::install_wfp_filters_with_tcp_loopback;
 use crate::local_user_flags;
 use crate::log_note;
 use crate::log_writer;
@@ -123,6 +123,8 @@ struct Payload {
     proxy_ports: Vec<u16>,
     #[serde(default)]
     allow_local_binding: bool,
+    #[serde(default)]
+    allow_tcp_loopback: bool,
     #[serde(default)]
     otel: Option<StatsigMetricsSettings>,
     real_user: String,
@@ -543,7 +545,14 @@ fn real_main(setup_mode: &mut Option<SetupMode>) -> Result<()> {
         ))
     })?;
     *setup_mode = Some(payload.mode);
-    if payload.version != SETUP_VERSION {
+    validate_network_mode(&payload)?;
+    if payload.version
+        != if payload.allow_tcp_loopback {
+            crate::branding::TCP_LOOPBACK_SETUP_VERSION
+        } else {
+            SETUP_VERSION
+        }
+    {
         return Err(anyhow::Error::new(SetupFailure::new(
             SetupErrorCode::HelperRequestArgsFailed,
             format!(
@@ -574,6 +583,7 @@ fn real_main(setup_mode: &mut Option<SetupMode>) -> Result<()> {
 }
 
 fn run_payload(payload: &Payload) -> Result<()> {
+    validate_network_mode(payload)?;
     let sbx_dir = sandbox_dir(&payload.codex_home);
     std::fs::create_dir_all(&sbx_dir).map_err(|err| {
         anyhow::Error::new(SetupFailure::new(
@@ -650,6 +660,7 @@ fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<(
             &payload.online_username,
             &payload.proxy_ports,
             payload.allow_local_binding,
+            payload.allow_tcp_loopback,
         )?;
     }
     Ok(())
@@ -766,18 +777,23 @@ fn provision_sandbox(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> 
     })?;
     let offline_sid_str = string_from_sid_bytes(&offline_sid).map_err(anyhow::Error::msg)?;
     configure_offline_sandbox_network(payload, &offline_sid_str, log)?;
-    let wfp_result = install_wfp_filters(
+    let wfp_result = install_wfp_filters_with_tcp_loopback(
         &payload.codex_home,
         &payload.offline_username,
+        payload.allow_tcp_loopback,
         payload.otel.as_ref(),
         |message| {
             let _ = log_line(log, message);
         },
     );
-    if repairing_disabled_accounts {
+    if payload.allow_tcp_loopback {
+        wfp_result?;
+    } else if repairing_disabled_accounts {
         // Ordinary setup keeps its best-effort WFP behavior. Recovery must not reopen logons
         // after cleanup removed protections unless restoring those protections succeeded.
         wfp_result?;
+    }
+    if repairing_disabled_accounts {
         for username in [&payload.offline_username, &payload.online_username] {
             let flags = local_user_flags(username)?.ok_or_else(|| {
                 anyhow::anyhow!("sandbox user {username} disappeared during repair")
@@ -797,6 +813,7 @@ fn configure_offline_sandbox_network(
         offline_sid_str,
         &payload.proxy_ports,
         payload.allow_local_binding,
+        payload.allow_tcp_loopback,
         log,
     );
     if let Err(err) = proxy_allowlist_result {
@@ -808,7 +825,8 @@ fn configure_offline_sandbox_network(
             format!("ensure offline proxy allowlist failed: {err}"),
         )));
     }
-    let firewall_result = firewall::ensure_offline_network_blocks(offline_sid_str, log);
+    let firewall_result =
+        firewall::ensure_offline_network_blocks(offline_sid_str, payload.allow_tcp_loopback, log);
     if let Err(err) = firewall_result {
         if extract_setup_failure(&err).is_some() {
             return Err(err);
@@ -1526,3 +1544,59 @@ mod tests {
         assert_eq!(deny_sids, vec![workspace_sid, nested_sid]);
     }
 }
+
+fn validate_network_mode(payload: &Payload) -> Result<()> {
+    let loopback_accounts = payload.offline_username
+        == crate::branding::TCP_LOOPBACK_OFFLINE_USERNAME
+        || payload.online_username == crate::branding::TCP_LOOPBACK_ONLINE_USERNAME;
+    if payload.allow_tcp_loopback {
+        anyhow::ensure!(
+            payload.version == crate::branding::TCP_LOOPBACK_SETUP_VERSION
+                && payload.offline_username == crate::branding::TCP_LOOPBACK_OFFLINE_USERNAME
+                && payload.online_username == crate::branding::TCP_LOOPBACK_ONLINE_USERNAME
+                && !payload.allow_local_binding
+                && payload.proxy_ports.is_empty()
+                && payload.runtime == SetupRuntime::Legacy,
+            "TCP loopback requires version 6, its separate account pair, and no UDP/local-binding or proxy exceptions"
+        );
+    } else {
+        anyhow::ensure!(
+            !loopback_accounts,
+            "TCP-loopback accounts cannot be used in strict mode"
+        );
+    }
+    let content = match std::fs::read(sandbox_dir(&payload.codex_home).join("setup_marker.json")) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(content) = content {
+        if !content.is_empty() {
+            let marker: crate::setup::SetupMarker = serde_json::from_slice(&content)?;
+            anyhow::ensure!(
+                marker.allow_tcp_loopback == payload.allow_tcp_loopback
+                    && marker.offline_username == payload.offline_username
+                    && marker.online_username == payload.online_username,
+                "sandbox home belongs to another network mode or account pair"
+            );
+        }
+    }
+    let users_path = sandbox_secrets_dir(&payload.codex_home).join("sandbox_users.json");
+    match std::fs::read(users_path) {
+        Ok(content) => {
+            let users: crate::setup::SandboxUsersFile = serde_json::from_slice(&content)?;
+            anyhow::ensure!(
+                users.offline.username == payload.offline_username
+                    && users.online.username == payload.online_username,
+                "sandbox credentials belong to another account pair"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "setup_provisioning/tcp_loopback_tests.rs"]
+mod tcp_loopback_tests;

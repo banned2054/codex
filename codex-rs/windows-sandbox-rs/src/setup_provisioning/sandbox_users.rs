@@ -307,6 +307,7 @@ struct SetupMarker {
     created_at: String,
     proxy_ports: Vec<u16>,
     allow_local_binding: bool,
+    allow_tcp_loopback: bool,
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
 }
@@ -483,14 +484,20 @@ pub(super) fn commit_setup_marker(
     online_user: &str,
     proxy_ports: &[u16],
     allow_local_binding: bool,
+    allow_tcp_loopback: bool,
 ) -> Result<()> {
     let marker = SetupMarker {
-        version: SETUP_VERSION,
+        version: if allow_tcp_loopback {
+            crate::branding::TCP_LOOPBACK_SETUP_VERSION
+        } else {
+            SETUP_VERSION
+        },
         offline_username: offline_user.to_string(),
         online_username: online_user.to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         proxy_ports: proxy_ports.to_vec(),
         allow_local_binding,
+        allow_tcp_loopback,
         read_roots: Vec::new(),
         write_roots: Vec::new(),
     };

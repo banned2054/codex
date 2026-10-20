@@ -1,3 +1,7 @@
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
+    FWP_BYTE_ARRAY16, FWP_BYTE_ARRAY16_TYPE, FWP_MATCH_NOT_EQUAL, FWP_MATCH_RANGE, FWP_RANGE_TYPE,
+    FWP_RANGE0, FWP_UINT32, FWPM_CONDITION_IP_REMOTE_ADDRESS,
+};
 mod filter_specs;
 
 use crate::to_wide;
@@ -61,6 +65,7 @@ use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::core::GUID;
 
 use filter_specs::ConditionSpec;
+#[cfg(test)]
 use filter_specs::FILTER_SPECS;
 use filter_specs::FilterSpec;
 
@@ -80,6 +85,19 @@ const SUBLAYER_KEY: GUID = crate::branding::WFP_SUBLAYER_KEY;
 /// may continue ordinary setup after an error, but must restore these filters
 /// before re-enabling accounts left disabled by interrupted cleanup.
 pub fn install_wfp_filters_for_account(account: &str) -> Result<usize> {
+    install_wfp_filters_for_account_with_tcp_loopback(account, false)
+}
+
+pub fn install_wfp_filters_for_account_with_tcp_loopback(
+    account: &str,
+    allow_tcp_loopback: bool,
+) -> Result<usize> {
+    if allow_tcp_loopback {
+        anyhow::ensure!(
+            account == crate::branding::TCP_LOOPBACK_OFFLINE_USERNAME,
+            "TCP loopback requires its separate sandbox account"
+        );
+    }
     let engine = Engine::open(INFINITE)?;
     let mut transaction = engine.begin_transaction()?;
     ensure_provider(engine.handle)?;
@@ -87,9 +105,9 @@ pub fn install_wfp_filters_for_account(account: &str) -> Result<usize> {
 
     let user_condition = UserMatchCondition::for_account(account)?;
     let mut installed_filter_count = 0;
-    for spec in FILTER_SPECS {
+    for spec in filter_specs::specs_for_mode(allow_tcp_loopback) {
         delete_filter_if_present(engine.handle, &spec.key)?;
-        add_filter(engine.handle, spec, &user_condition)?;
+        add_filter(engine.handle, &spec, &user_condition)?;
         installed_filter_count += 1;
     }
 
@@ -101,7 +119,10 @@ pub(crate) fn remove_wfp_filters() -> Result<()> {
     // Leave time for other cleanup if a WFP policy writer holds the transaction lock.
     let engine = Engine::open(/*transaction_wait_timeout_ms*/ 1_000)?;
     let mut transaction = engine.begin_transaction()?;
-    for spec in FILTER_SPECS {
+    for spec in filter_specs::specs_for_mode(false)
+        .into_iter()
+        .chain(filter_specs::specs_for_mode(true))
+    {
         delete_filter_if_present(engine.handle, &spec.key)?;
     }
     for (result, operation, missing) in [
@@ -298,7 +319,8 @@ fn add_filter(
 ) -> Result<()> {
     let filter_name = to_wide(OsStr::new(spec.name));
     let filter_description = to_wide(OsStr::new(spec.description));
-    let mut filter_conditions = build_conditions(spec.conditions, user_condition);
+    let addresses = AddressConditions::new();
+    let mut filter_conditions = build_conditions(spec.conditions, user_condition, &addresses);
     let provider_key = PROVIDER_KEY;
     let filter = FWPM_FILTER0 {
         filterKey: spec.key,
@@ -335,10 +357,37 @@ fn add_filter(
 fn build_conditions(
     specs: &[ConditionSpec],
     user_condition: &UserMatchCondition,
+    addresses: &AddressConditions,
 ) -> Vec<FWPM_FILTER_CONDITION0> {
     specs
         .iter()
         .map(|spec| match spec {
+            ConditionSpec::NonLoopbackV4Low | ConditionSpec::NonLoopbackV4High => {
+                FWPM_FILTER_CONDITION0 {
+                    fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+                    matchType: FWP_MATCH_RANGE,
+                    conditionValue: FWP_CONDITION_VALUE0 {
+                        r#type: FWP_RANGE_TYPE,
+                        Anonymous: FWP_CONDITION_VALUE0_0 {
+                            rangeValue: if matches!(spec, ConditionSpec::NonLoopbackV4Low) {
+                                &addresses.v4_low as *const _ as *mut _
+                            } else {
+                                &addresses.v4_high as *const _ as *mut _
+                            },
+                        },
+                    },
+                }
+            }
+            ConditionSpec::NonLoopbackV6 => FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_IP_REMOTE_ADDRESS,
+                matchType: FWP_MATCH_NOT_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_BYTE_ARRAY16_TYPE,
+                    Anonymous: FWP_CONDITION_VALUE0_0 {
+                        byteArray16: &addresses.v6_loopback as *const _ as *mut _,
+                    },
+                },
+            },
             ConditionSpec::User => FWPM_FILTER_CONDITION0 {
                 fieldKey: FWPM_CONDITION_ALE_USER_ID,
                 matchType: FWP_MATCH_EQUAL,
@@ -488,3 +537,32 @@ mod tests {
         assert_eq!(names.len(), FILTER_SPECS.len());
     }
 }
+
+// 地址存储活到 FwpmFilterAdd0 返回，避免条件 union 持有临时对象指针。
+struct AddressConditions {
+    v4_low: FWP_RANGE0,
+    v4_high: FWP_RANGE0,
+    v6_loopback: FWP_BYTE_ARRAY16,
+}
+
+impl AddressConditions {
+    fn new() -> Self {
+        fn ipv4_range(low: u32, high: u32) -> FWP_RANGE0 {
+            FWP_RANGE0 {
+                valueLow: FWP_VALUE0 { r#type: FWP_UINT32, Anonymous: windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 { uint32: low } },
+                valueHigh: FWP_VALUE0 { r#type: FWP_UINT32, Anonymous: windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 { uint32: high } },
+            }
+        }
+        Self {
+            v4_low: ipv4_range(0, 0x7eff_ffff),
+            v4_high: ipv4_range(0x8000_0000, u32::MAX),
+            v6_loopback: FWP_BYTE_ARRAY16 {
+                byteArray16: std::net::Ipv6Addr::LOCALHOST.octets(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "wfp/tcp_loopback_tests.rs"]
+mod tcp_loopback_tests;
