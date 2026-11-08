@@ -30,6 +30,7 @@ pub fn provision_sandbox_in_process(
         write_roots: Vec::new(),
         deny_read_paths: Vec::new(),
         deny_write_paths: Vec::new(),
+        authorized_read_paths: Vec::new(),
         proxy_ports: settings.proxy_ports,
         allow_local_binding: settings.allow_local_binding,
         allow_tcp_loopback: false,

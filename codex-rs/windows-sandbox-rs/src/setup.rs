@@ -49,7 +49,7 @@ use windows_sys::Win32::Security::CheckTokenMembership;
 use windows_sys::Win32::Security::FreeSid;
 use windows_sys::Win32::Security::SECURITY_NT_AUTHORITY;
 
-pub const SETUP_VERSION: u32 = 5;
+pub const SETUP_VERSION: u32 = 7;
 pub use crate::branding::OFFLINE_USERNAME;
 pub use crate::branding::ONLINE_USERNAME;
 const ERROR_CANCELLED: u32 = 1223;
@@ -356,6 +356,7 @@ fn run_setup_refresh_inner(
         write_roots,
         deny_read_paths,
         deny_write_paths,
+        authorized_read_paths: Vec::new(),
         proxy_ports: offline_proxy_settings.proxy_ports,
         allow_local_binding: offline_proxy_settings.allow_local_binding,
         otel: None,
@@ -734,6 +735,10 @@ struct ElevationPayload {
     deny_read_paths: Vec<PathBuf>,
     #[serde(default)]
     deny_write_paths: Vec<PathBuf>,
+    /// Approved-read roots granted to the authorized principal for this
+    /// command; an empty list means an ordinary execution.
+    #[serde(default)]
+    authorized_read_paths: Vec<PathBuf>,
     proxy_ports: Vec<u16>,
     #[serde(default)]
     allow_local_binding: bool,
@@ -1185,6 +1190,7 @@ fn elevated_provisioning_payload(
         write_roots: Vec::new(),
         deny_read_paths: Vec::new(),
         deny_write_paths: Vec::new(),
+        authorized_read_paths: Vec::new(),
         proxy_ports: offline_proxy_settings.proxy_ports,
         allow_local_binding: offline_proxy_settings.allow_local_binding,
         real_user,
@@ -1266,6 +1272,7 @@ pub fn run_elevated_provisioning_setup_with_retained_handles(
         write_roots: Vec::new(),
         deny_read_paths: Vec::new(),
         deny_write_paths: Vec::new(),
+        authorized_read_paths: Vec::new(),
         proxy_ports: settings.proxy_ports,
         allow_local_binding: settings.allow_local_binding,
         otel: codex_otel::global_statsig_metrics_settings(),

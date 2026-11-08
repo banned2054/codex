@@ -64,6 +64,8 @@ mod acl;
 #[cfg(target_os = "windows")]
 mod allow;
 #[cfg(target_os = "windows")]
+mod authorized_paths;
+#[cfg(target_os = "windows")]
 mod app_package;
 #[cfg(target_os = "windows")]
 #[doc(hidden)]

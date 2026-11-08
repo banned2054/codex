@@ -70,6 +70,9 @@ pub enum SetupErrorCode {
     HelperReadAclHelperSpawnFailed,
     /// Helper failed to lock down sandbox directories via ACLs.
     HelperSandboxLockFailed,
+    /// Helper refused an approved-read request: the trusted protected-path manifest
+    /// was missing or unparsable, or an approved path overlaps a protected path.
+    HelperAuthorizedReadRejected,
     /// Helper failed for an unmapped or unexpected reason.
     HelperUnknownError,
 }
@@ -106,6 +109,7 @@ impl SetupErrorCode {
             Self::HelperFirewallRuleVerifyFailed => "helper_firewall_rule_verify_failed",
             Self::HelperReadAclHelperSpawnFailed => "helper_read_acl_helper_spawn_failed",
             Self::HelperSandboxLockFailed => "helper_sandbox_lock_failed",
+            Self::HelperAuthorizedReadRejected => "helper_authorized_read_rejected",
             Self::HelperUnknownError => "helper_unknown_error",
         }
     }

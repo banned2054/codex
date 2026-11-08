@@ -37,6 +37,7 @@ use crate::setup_acl_error::record_acl_failure;
 use crate::setup_error_path;
 use crate::setup_log_writer;
 use crate::string_from_sid_bytes;
+use crate::deny_read_state::sync_persistent_authorized_read_grants;
 use crate::sync_persistent_deny_read_acls;
 use crate::to_wide;
 use crate::workspace_write_cap_sid_for_root;
@@ -120,6 +121,11 @@ struct Payload {
     deny_read_paths: Vec<PathBuf>,
     #[serde(default)]
     deny_write_paths: Vec<PathBuf>,
+    /// Approved-read roots for this command, honored only at setup protocol 7.
+    /// An empty list (including its absence in legacy payloads) means an
+    /// ordinary execution keyed to the sandbox group.
+    #[serde(default)]
+    authorized_read_paths: Vec<PathBuf>,
     proxy_ports: Vec<u16>,
     #[serde(default)]
     allow_local_binding: bool,
@@ -546,21 +552,7 @@ fn real_main(setup_mode: &mut Option<SetupMode>) -> Result<()> {
     })?;
     *setup_mode = Some(payload.mode);
     validate_network_mode(&payload)?;
-    if payload.version
-        != if payload.allow_tcp_loopback {
-            crate::branding::TCP_LOOPBACK_SETUP_VERSION
-        } else {
-            SETUP_VERSION
-        }
-    {
-        return Err(anyhow::Error::new(SetupFailure::new(
-            SetupErrorCode::HelperRequestArgsFailed,
-            format!(
-                "setup version mismatch: expected {SETUP_VERSION}, got {}",
-                payload.version
-            ),
-        )));
-    }
+    validate_payload_version(&payload)?;
     // Only this entry parses command-line JSON. Keep admission locked through
     // the entire account-provisioning operation, including initial Full setup.
     // The in-process adapter enters separately after authenticated service admission.
@@ -597,7 +589,11 @@ fn run_payload(payload: &Payload) -> Result<()> {
             format!("open log in {} failed: {err}", sbx_dir.display()),
         ))
     })?;
-    let result = run_setup(payload, &mut log, &sbx_dir);
+    // Approved-read requests are validated against the trusted protected-path
+    // manifest before anything mutates ACLs, so a rejected request leaves no
+    // ACE changes behind.
+    let result = validate_authorized_execution(payload)
+        .and_then(|()| run_setup(payload, &mut log, &sbx_dir));
     if let Err(err) = &result {
         let _ = log_line(&mut log, &format!("setup error: {err:?}"));
         log_note(&format!("setup error: {err:?}"), Some(sbx_dir.as_path()));
@@ -632,6 +628,24 @@ fn run_payload(payload: &Payload) -> Result<()> {
         }
     }
     result
+}
+
+/// Refuses approved-read requests that fail the trusted protected-path checks.
+/// Ordinary requests pass through untouched.
+fn validate_authorized_execution(payload: &Payload) -> Result<()> {
+    if payload.authorized_read_paths.is_empty() {
+        return Ok(());
+    }
+    crate::authorized_paths::validate_authorized_read_paths(
+        &payload.codex_home,
+        &payload.authorized_read_paths,
+    )
+    .map_err(|err| {
+        anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperAuthorizedReadRejected,
+            format!("{err:#}"),
+        ))
+    })
 }
 
 fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
@@ -997,6 +1011,154 @@ fn run_provision_only(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) ->
     Ok(())
 }
 
+/// The resolved approved-read group principal for one payload.
+///
+/// `psid` is owned by the receiver and must be freed with `LocalFree`.
+struct AuthorizedGroupPrincipal {
+    sid_str: String,
+    psid: *mut c_void,
+}
+
+/// Applies the approved-read ACL surface for one payload and returns the
+/// resolved authorized group principal.
+///
+/// Every version 7 payload reconciles the authorized principal in addition to
+/// the sandbox group: its deny set is the full deny list minus the approved
+/// reads, and its grant bookkeeping revokes approved-read RX ACEs that the
+/// payload no longer authorizes. A payload without approved reads therefore
+/// restores the authorized principal completely (full deny again, grants
+/// revoked). Legacy version 5/6 payloads keep the single-principal behavior
+/// and return `None`, as does a version 7 payload when the group has not been
+/// provisioned yet. On failure no principal is returned and the resolved PSID
+/// is released before the error propagates.
+fn sync_authorized_read_acls(
+    payload: &Payload,
+    log: &mut dyn Write,
+) -> Result<Option<AuthorizedGroupPrincipal>> {
+    if payload.version != SETUP_VERSION {
+        return Ok(None);
+    }
+    let authorized_execution = !payload.authorized_read_paths.is_empty();
+    let authorized_group_sid = match resolve_sid(crate::branding::AUTHORIZED_USERS_GROUP) {
+        Ok(sid) => sid,
+        Err(err) => {
+            if !authorized_execution {
+                log_line(
+                    log,
+                    "authorized users group missing; skipping authorized deny sync",
+                )?;
+                return Ok(None);
+            }
+            return Err(anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperSidResolveFailed,
+                format!("resolve authorized users group SID failed: {err}"),
+            )));
+        }
+    };
+    let authorized_group_sid_str =
+        string_from_sid_bytes(&authorized_group_sid).map_err(anyhow::Error::msg)?;
+    let authorized_group_psid = sid_bytes_to_psid(&authorized_group_sid).map_err(|err| {
+        anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperSidResolveFailed,
+            format!("convert authorized users group SID to PSID failed: {err}"),
+        ))
+    })?;
+    let release_psid = |psid: *mut c_void| unsafe {
+        if !psid.is_null() {
+            LocalFree(psid as HLOCAL);
+        }
+    };
+    let mut reconcile = || -> Result<()> {
+        // Grant reconciliation runs BEFORE the deny reconciliation: both drive the same
+        // principal on the same paths, and revoke_ace deletes every explicit ACE for a
+        // SID regardless of type (REVOKE_ACCESS). Deny-first ordering would re-apply the
+        // full deny (including a path losing its approval) and then delete that fresh
+        // deny ACE while revoking the stale grant, silently widening the authorized
+        // principal's read surface while reporting success. Grants-first revokes the
+        // stale RX while the path carries no deny for this principal, and the deny set
+        // then lands on top and stays.
+        unsafe {
+            sync_persistent_authorized_read_grants(
+                &payload.codex_home,
+                &authorized_group_sid_str,
+                &payload.authorized_read_paths,
+                authorized_group_psid,
+            )
+        }
+        .context("apply approved-read grants")?;
+        let desired_deny = crate::authorized_paths::authorized_deny_read_paths(
+            &payload.deny_read_paths,
+            &payload.authorized_read_paths,
+        );
+        unsafe {
+            sync_persistent_deny_read_acls(
+                &payload.codex_home,
+                &authorized_group_sid_str,
+                &desired_deny,
+                authorized_group_psid,
+            )
+        }
+        .context("apply authorized-principal deny-read ACLs")?;
+        if authorized_execution {
+            grant_authorized_baseline_read_roots(payload, authorized_group_psid, log)?;
+        }
+        Ok(())
+    };
+    match reconcile() {
+        Ok(()) => Ok(Some(AuthorizedGroupPrincipal {
+            sid_str: authorized_group_sid_str,
+            psid: authorized_group_psid,
+        })),
+        Err(err) => {
+            release_psid(authorized_group_psid);
+            Err(err)
+        }
+    }
+}
+
+/// Grants the baseline read surface to the authorized principal so an
+/// approved-read command keeps the ordinary read face on the same roots the
+/// sandbox group would receive.
+fn grant_authorized_baseline_read_roots(
+    payload: &Payload,
+    authorized_group_psid: *mut c_void,
+    log: &mut dyn Write,
+) -> Result<()> {
+    for root in &payload.read_roots {
+        if !root.exists() {
+            log_line(
+                log,
+                &format!("read root {} missing; skipping", root.display()),
+            )?;
+            continue;
+        }
+        if let Err(err) = unsafe {
+            ensure_allow_mask_aces_with_inheritance(
+                root,
+                &[authorized_group_psid],
+                FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+            )
+        } {
+            let message = format!(
+                "grant baseline read ACE failed on {} for authorized users: {err}",
+                root.display()
+            );
+            log_line(log, &message)?;
+            // An incomplete approved-read surface must not pass silently.
+            return Err(anyhow::anyhow!(message));
+        }
+        log_line(
+            log,
+            &format!(
+                "granted baseline read ACE to {} for authorized users",
+                root.display()
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
     let refresh_only = payload.refresh_only;
     if !refresh_only {
@@ -1038,6 +1200,20 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
             &format!("applied {} deny-read ACLs", applied_deny_read_paths.len()),
         )?;
     }
+
+    let authorized_principal = sync_authorized_read_acls(payload, log)?;
+    // Write ACEs and the runtime read face follow the payload: an approved-read
+    // execution runs under the authorized account, so both principals need the
+    // same baseline surface. Ordinary payloads leave the authorized group
+    // untouched apart from the deny/grant reconciliation above.
+    let authorized_execution = payload.version == SETUP_VERSION
+        && !payload.authorized_read_paths.is_empty()
+        && authorized_principal.is_some();
+    let authorized_write_principal = if authorized_execution {
+        authorized_principal.as_ref()
+    } else {
+        None
+    };
 
     if let Some(user_profile) = payload.user_profile.as_deref()
         && user_profile.is_absolute()
@@ -1116,15 +1292,16 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
     }
 
     if refresh_only {
+        let authorized_runtime_psid = authorized_write_principal.map(|principal| principal.psid);
         setup_runtime_bin::ensure_codex_app_runtime_paths_readable(
             sandbox_group_psid,
-            /*authorized_group_psid*/ None,
+            authorized_runtime_psid,
             &mut refresh_errors,
             log,
         )?;
     }
 
-    let mut grant_tasks: Vec<(PathBuf, String)> = Vec::new();
+    let mut grant_tasks: Vec<(PathBuf, Vec<String>)> = Vec::new();
 
     let mut seen_deny_paths: HashSet<PathBuf> = HashSet::new();
     let mut seen_write_roots: HashSet<PathBuf> = HashSet::new();
@@ -1145,39 +1322,47 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
             convert_string_sid_to_sid(&root_cap_sid_str)
                 .ok_or_else(|| anyhow::anyhow!("convert write root capability SID failed"))?
         };
-        let need_grant =
-            match path_write_aces_need_refresh(root, &[sandbox_group_psid, root_cap_psid]) {
-                Ok(needs_refresh) => needs_refresh,
-                Err(e) => {
-                    record_acl_failure(
-                        &mut refresh_errors,
-                        WriteAclOperation::Check,
-                        root,
-                        &e,
-                        |message| log_line(log, message),
-                    )?;
-                    true
-                }
-            };
+        let mut check_psids = vec![sandbox_group_psid, root_cap_psid];
+        if let Some(principal) = authorized_write_principal {
+            check_psids.push(principal.psid);
+        }
+        let need_grant = match path_write_aces_need_refresh(root, &check_psids) {
+            Ok(needs_refresh) => needs_refresh,
+            Err(e) => {
+                record_acl_failure(
+                    &mut refresh_errors,
+                    WriteAclOperation::Check,
+                    root,
+                    &e,
+                    |message| log_line(log, message),
+                )?;
+                true
+            }
+        };
         unsafe {
             LocalFree(root_cap_psid as HLOCAL);
         }
         if need_grant {
+            let mut sid_strings = vec![sandbox_group_sid_str.clone(), root_cap_sid_str];
+            if let Some(principal) = authorized_write_principal {
+                sid_strings.push(principal.sid_str.clone());
+            }
+            let subjects = if authorized_write_principal.is_some() {
+                "sandbox group, authorized users, and capability SID"
+            } else {
+                "sandbox group and capability SID"
+            };
             log_line(
                 log,
-                &format!(
-                    "granting write ACE to {} for sandbox group and capability SID",
-                    root.display()
-                ),
+                &format!("granting write ACE to {} for {subjects}", root.display()),
             )?;
-            grant_tasks.push((root.clone(), root_cap_sid_str));
+            grant_tasks.push((root.clone(), sid_strings));
         }
     }
 
     let (tx, rx) = mpsc::channel::<(PathBuf, Result<bool>)>();
     std::thread::scope(|scope| {
-        for (root, root_cap_sid_str) in grant_tasks {
-            let sid_strings = vec![sandbox_group_sid_str.clone(), root_cap_sid_str];
+        for (root, sid_strings) in grant_tasks {
             let tx = tx.clone();
             scope.spawn(move || {
                 // Convert SID strings to psids locally in this thread.
@@ -1296,6 +1481,13 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
     unsafe {
         if !sandbox_group_psid.is_null() {
             LocalFree(sandbox_group_psid as HLOCAL);
+        }
+    }
+    if let Some(principal) = authorized_principal {
+        unsafe {
+            if !principal.psid.is_null() {
+                LocalFree(principal.psid as HLOCAL);
+            }
         }
     }
     if refresh_only && !refresh_errors.is_empty() {
@@ -1616,6 +1808,36 @@ mod tests {
     }
 }
 
+/// Gates the request on the setup protocol version accepted by this helper.
+///
+/// TCP loopback keeps its separate version 6 contract, approved-read requests
+/// require version 7, and ordinary requests accept the legacy version 5 and
+/// the current version 7. Version 7 with an empty approved-read list behaves
+/// exactly like a legacy ordinary request.
+fn validate_payload_version(payload: &Payload) -> Result<()> {
+    let version_ok = if payload.allow_tcp_loopback {
+        payload.version == crate::branding::TCP_LOOPBACK_SETUP_VERSION
+            && payload.authorized_read_paths.is_empty()
+    } else if !payload.authorized_read_paths.is_empty() {
+        payload.version == SETUP_VERSION
+    } else {
+        payload.version == SETUP_VERSION || payload.version == crate::branding::LEGACY_SETUP_VERSION
+    };
+    if !version_ok {
+        return Err(anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperRequestArgsFailed,
+            format!(
+                "setup version mismatch: expected {} (or {} without approved reads, {} for TCP loopback), got {}",
+                SETUP_VERSION,
+                crate::branding::LEGACY_SETUP_VERSION,
+                crate::branding::TCP_LOOPBACK_SETUP_VERSION,
+                payload.version
+            ),
+        )));
+    }
+    Ok(())
+}
+
 fn validate_network_mode(payload: &Payload) -> Result<()> {
     let loopback_accounts = payload.offline_username
         == crate::branding::TCP_LOOPBACK_OFFLINE_USERNAME
@@ -1627,8 +1849,9 @@ fn validate_network_mode(payload: &Payload) -> Result<()> {
                 && payload.online_username == crate::branding::TCP_LOOPBACK_ONLINE_USERNAME
                 && !payload.allow_local_binding
                 && payload.proxy_ports.is_empty()
+                && payload.authorized_read_paths.is_empty()
                 && payload.runtime == SetupRuntime::Legacy,
-            "TCP loopback requires version 6, its separate account pair, and no UDP/local-binding or proxy exceptions"
+            "TCP loopback requires version 6, its separate account pair, and no UDP/local-binding, proxy, or approved-read exceptions"
         );
     } else {
         anyhow::ensure!(
@@ -1671,3 +1894,7 @@ fn validate_network_mode(payload: &Payload) -> Result<()> {
 #[cfg(test)]
 #[path = "setup_provisioning/tcp_loopback_tests.rs"]
 mod tcp_loopback_tests;
+
+#[cfg(test)]
+#[path = "setup_provisioning/authorized_gate_tests.rs"]
+mod authorized_gate_tests;
