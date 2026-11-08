@@ -23,11 +23,19 @@ mod tests;
 #[path = "setup_runtime_long_paths_tests.rs"]
 mod long_paths_tests;
 
+/// Ensures the runtime read face for the sandbox group and, during an
+/// approved-read execution, for the authorized group as well. Grants are
+/// additive and never revoked, matching the sandbox group's treatment.
 pub(super) fn ensure_codex_app_runtime_paths_readable(
     sandbox_group_psid: *mut c_void,
+    authorized_group_psid: Option<*mut c_void>,
     refresh_errors: &mut Vec<String>,
     log: &mut dyn Write,
 ) -> Result<()> {
+    let mut subjects = vec![(sandbox_group_psid, "sandbox_group")];
+    if let Some(psid) = authorized_group_psid {
+        subjects.push((psid, "authorized_users"));
+    }
     let read_execute_mask = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
     let local_app_data = local_app_data_root();
     let runtime_paths = runtime_paths(
@@ -42,66 +50,70 @@ pub(super) fn ensure_codex_app_runtime_paths_readable(
             continue;
         }
 
-        let has_access = match path_mask_allows(
-            &runtime_path,
-            &[sandbox_group_psid],
-            read_execute_mask,
-            /*require_all_bits*/ true,
-        ) {
-            Ok(has_access) => has_access,
-            Err(err) => {
+        for (psid, label) in &subjects {
+            let has_access = match path_mask_allows(
+                &runtime_path,
+                &[*psid],
+                read_execute_mask,
+                /*require_all_bits*/ true,
+            ) {
+                Ok(has_access) => has_access,
+                Err(err) => {
+                    refresh_errors.push(format!(
+                        "runtime read/execute mask check failed on {} for {label}: {err}",
+                        runtime_path.display()
+                    ));
+                    super::log_line(
+                        log,
+                        &format!(
+                            "runtime read/execute mask check failed on {} for {label}: {err}; continuing",
+                            runtime_path.display()
+                        ),
+                    )?;
+                    false
+                }
+            };
+            if has_access {
+                continue;
+            }
+
+            super::log_line(
+                log,
+                &format!(
+                    "granting read/execute ACE to {} for {label}",
+                    runtime_path.display()
+                ),
+            )?;
+            let result = unsafe {
+                grant_read_execute_aces(
+                    &runtime_path,
+                    &[*psid],
+                    OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                )
+            };
+            if let Err(err) = result {
                 refresh_errors.push(format!(
-                    "runtime read/execute mask check failed on {} for sandbox_group: {err}",
+                    "grant read/execute ACE failed on {} for {label}: {err}",
                     runtime_path.display()
                 ));
                 super::log_line(
                     log,
                     &format!(
-                        "runtime read/execute mask check failed on {} for sandbox_group: {err}; continuing",
+                        "grant read/execute ACE failed on {} for {label}: {err}",
                         runtime_path.display()
                     ),
                 )?;
-                false
             }
-        };
-        if has_access {
-            continue;
-        }
-
-        super::log_line(
-            log,
-            &format!(
-                "granting read/execute ACE to {} for sandbox users",
-                runtime_path.display()
-            ),
-        )?;
-        let result = unsafe {
-            grant_read_execute_aces(
-                &runtime_path,
-                &[sandbox_group_psid],
-                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-            )
-        };
-        if let Err(err) = result {
-            refresh_errors.push(format!(
-                "grant read/execute ACE failed on {} for sandbox_group: {err}",
-                runtime_path.display()
-            ));
-            super::log_line(
-                log,
-                &format!(
-                    "grant read/execute ACE failed on {} for sandbox_group: {err}",
-                    runtime_path.display()
-                ),
-            )?;
         }
     }
     if let Some(local_app_data) = local_app_data {
         let runtime_root = local_app_data.join("OpenAI").join("Codex").join("runtimes");
-        if let Err(err) = ensure_runtime_tree_readable(&runtime_root, sandbox_group_psid) {
-            let message = format!("runtime read/execute validation failed: {err:#}");
-            super::log_line(log, &message)?;
-            refresh_errors.push(message);
+        for (psid, label) in &subjects {
+            if let Err(err) = ensure_runtime_tree_readable(&runtime_root, *psid) {
+                let message = format!("runtime read/execute validation failed for {label}: {err:#}");
+                super::log_line(log, &message)?;
+                refresh_errors.push(message);
+            }
         }
     }
     Ok(())

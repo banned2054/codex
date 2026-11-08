@@ -732,7 +732,12 @@ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
 fn provision_sandbox(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
     let _setup_lock = acquire_sandbox_setup_lock(INFINITE)?;
     let mut repairing_disabled_accounts = false;
-    for username in [&payload.offline_username, &payload.online_username] {
+    for username in [
+        payload.offline_username.as_str(),
+        payload.online_username.as_str(),
+        crate::branding::AUTHORIZED_OFFLINE_USERNAME,
+        crate::branding::AUTHORIZED_ONLINE_USERNAME,
+    ] {
         if local_user_flags(username)?.is_some_and(|flags| flags & UF_ACCOUNTDISABLE != 0) {
             repairing_disabled_accounts = true;
         }
@@ -764,6 +769,8 @@ fn provision_sandbox(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> 
     let users = vec![
         payload.offline_username.clone(),
         payload.online_username.clone(),
+        crate::branding::AUTHORIZED_OFFLINE_USERNAME.to_string(),
+        crate::branding::AUTHORIZED_ONLINE_USERNAME.to_string(),
     ];
     hide_newly_created_users(&users, sbx_dir);
     let offline_sid = resolve_sid(&payload.offline_username).map_err(|err| {
@@ -777,6 +784,19 @@ fn provision_sandbox(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> 
     })?;
     let offline_sid_str = string_from_sid_bytes(&offline_sid).map_err(anyhow::Error::msg)?;
     configure_offline_sandbox_network(payload, &offline_sid_str, log)?;
+    let authorized_offline_sid = resolve_sid(crate::branding::AUTHORIZED_OFFLINE_USERNAME)
+        .map_err(|err| {
+            anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperSidResolveFailed,
+                format!(
+                    "resolve SID for authorized offline user {} failed: {err}",
+                    crate::branding::AUTHORIZED_OFFLINE_USERNAME
+                ),
+            ))
+        })?;
+    let authorized_offline_sid_str =
+        string_from_sid_bytes(&authorized_offline_sid).map_err(anyhow::Error::msg)?;
+    configure_authorized_offline_network(payload, &authorized_offline_sid_str, log)?;
     let wfp_result = install_wfp_filters_with_tcp_loopback(
         &payload.codex_home,
         &payload.offline_username,
@@ -794,12 +814,62 @@ fn provision_sandbox(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> 
         wfp_result?;
     }
     if repairing_disabled_accounts {
-        for username in [&payload.offline_username, &payload.online_username] {
+        for username in [
+            payload.offline_username.as_str(),
+            payload.online_username.as_str(),
+            crate::branding::AUTHORIZED_OFFLINE_USERNAME,
+            crate::branding::AUTHORIZED_ONLINE_USERNAME,
+        ] {
             let flags = local_user_flags(username)?.ok_or_else(|| {
                 anyhow::anyhow!("sandbox user {username} disappeared during repair")
             })?;
             set_local_user_flags(username, flags & !UF_ACCOUNTDISABLE)?;
         }
+    }
+    Ok(())
+}
+
+/// Mirrors the offline network restrictions onto the approved-read offline
+/// account so an approved-read command with the offline identity stays blocked
+/// from non-loopback traffic. The approved-read online account needs no rules,
+/// matching the online sandbox account.
+fn configure_authorized_offline_network(
+    payload: &Payload,
+    authorized_offline_sid_str: &str,
+    log: &mut dyn Write,
+) -> Result<()> {
+    let names = &firewall::AUTHORIZED_OFFLINE_RULE_NAMES;
+    let proxy_allowlist_result = firewall::ensure_offline_proxy_allowlist_for_rules(
+        names,
+        authorized_offline_sid_str,
+        &payload.proxy_ports,
+        payload.allow_local_binding,
+        payload.allow_tcp_loopback,
+        log,
+    );
+    if let Err(err) = proxy_allowlist_result {
+        if extract_setup_failure(&err).is_some() {
+            return Err(err);
+        }
+        return Err(anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperFirewallRuleCreateOrAddFailed,
+            format!("ensure authorized offline proxy allowlist failed: {err}"),
+        )));
+    }
+    let firewall_result = firewall::ensure_offline_network_blocks_for_rules(
+        names,
+        authorized_offline_sid_str,
+        payload.allow_tcp_loopback,
+        log,
+    );
+    if let Err(err) = firewall_result {
+        if extract_setup_failure(&err).is_some() {
+            return Err(err);
+        }
+        return Err(anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperFirewallRuleCreateOrAddFailed,
+            format!("ensure authorized offline network blocks failed: {err}"),
+        )));
     }
     Ok(())
 }
@@ -1048,6 +1118,7 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
     if refresh_only {
         setup_runtime_bin::ensure_codex_app_runtime_paths_readable(
             sandbox_group_psid,
+            /*authorized_group_psid*/ None,
             &mut refresh_errors,
             log,
         )?;

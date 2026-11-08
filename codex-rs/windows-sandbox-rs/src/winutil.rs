@@ -221,13 +221,18 @@ pub fn set_local_user_flags(name: &str, flags: u32) -> Result<()> {
 }
 
 pub fn ensure_sandbox_users_group() -> Result<Vec<u8>> {
+    ensure_local_group(SANDBOX_USERS_GROUP, SANDBOX_USERS_GROUP_COMMENT)
+}
+
+/// Creates one managed local group if missing and resolves its SID.
+pub fn ensure_local_group(name: &str, comment: &str) -> Result<Vec<u8>> {
     const ERROR_ALIAS_EXISTS: u32 = 1379;
     const NERR_GROUP_EXISTS: u32 = 2223;
 
-    let name = to_wide(SANDBOX_USERS_GROUP);
-    let comment = to_wide(SANDBOX_USERS_GROUP_COMMENT);
+    let name_wide = to_wide(name);
+    let comment = to_wide(comment);
     let info = LOCALGROUP_INFO_1 {
-        lgrpi1_name: name.as_ptr() as *mut u16,
+        lgrpi1_name: name_wide.as_ptr() as *mut u16,
         lgrpi1_comment: comment.as_ptr() as *mut u16,
     };
     let mut parameter_error = 0;
@@ -241,11 +246,21 @@ pub fn ensure_sandbox_users_group() -> Result<Vec<u8>> {
     };
     if status != NERR_Success && status != ERROR_ALIAS_EXISTS && status != NERR_GROUP_EXISTS {
         return Err(anyhow::anyhow!(
-            "NetLocalGroupAdd failed for {SANDBOX_USERS_GROUP} code {status} parm_err={parameter_error}"
+            "NetLocalGroupAdd failed for {name} code {status} parm_err={parameter_error}"
         ));
     }
 
-    resolve_sid(SANDBOX_USERS_GROUP)
+    resolve_sid(name)
+}
+
+/// Ensures the approved-read group exists. It deliberately stays a separate
+/// principal from `SANDBOX_USERS_GROUP` so persistent deny ACEs on the sandbox
+/// group cannot shadow approved-read grants.
+pub fn ensure_sandbox_authorized_users_group() -> Result<Vec<u8>> {
+    ensure_local_group(
+        crate::branding::AUTHORIZED_USERS_GROUP,
+        crate::branding::AUTHORIZED_USERS_GROUP_COMMENT,
+    )
 }
 
 pub fn resolve_sid(name: &str) -> Result<Vec<u8>> {

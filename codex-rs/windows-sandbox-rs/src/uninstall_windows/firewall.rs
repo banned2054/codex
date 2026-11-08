@@ -22,6 +22,11 @@ pub(super) fn cleanup_firewall_rules() -> Result<()> {
         crate::branding::OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
         crate::branding::OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
         crate::branding::OFFLINE_PROXY_ALLOW_RULE_NAME,
+        crate::branding::AUTHORIZED_OFFLINE_BLOCK_RULE_NAME,
+        crate::branding::AUTHORIZED_OFFLINE_BLOCK_INBOUND_RULE_NAME,
+        crate::branding::AUTHORIZED_OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+        crate::branding::AUTHORIZED_OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
+        crate::branding::AUTHORIZED_OFFLINE_PROXY_ALLOW_RULE_NAME,
     ] {
         for scoped_name in [name.to_owned(), format!("{name}_tcp_loopback")] {
             if let Err(error) = unsafe { rules.Remove(&BSTR::from(scoped_name.as_str())) } {

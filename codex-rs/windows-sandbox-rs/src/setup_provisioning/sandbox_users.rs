@@ -79,20 +79,47 @@ pub(super) fn provision_sandbox_users(
             message,
         )));
     }
+    if let Err(err) = crate::ensure_sandbox_authorized_users_group() {
+        let message = format!(
+            "failed to create local group {}: {err}",
+            crate::branding::AUTHORIZED_USERS_GROUP
+        );
+        super::log_line(log, &message)?;
+        return Err(anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperUsersGroupCreateFailed,
+            message,
+        )));
+    }
     super::log_line(
         log,
         &format!("ensuring sandbox users offline={offline_username} online={online_username}"),
     )?;
     let offline_password = random_password();
     let online_password = random_password();
+    let authorized_offline_password = random_password();
+    let authorized_online_password = random_password();
     ensure_sandbox_user(offline_username, &offline_password, new_user_flags, log)?;
     ensure_sandbox_user(online_username, &online_password, new_user_flags, log)?;
+    ensure_authorized_user(
+        crate::branding::AUTHORIZED_OFFLINE_USERNAME,
+        &authorized_offline_password,
+        new_user_flags,
+        log,
+    )?;
+    ensure_authorized_user(
+        crate::branding::AUTHORIZED_ONLINE_USERNAME,
+        &authorized_online_password,
+        new_user_flags,
+        log,
+    )?;
     write_secrets(
         codex_home,
         offline_username,
         &offline_password,
         online_username,
         &online_password,
+        &authorized_offline_password,
+        &authorized_online_password,
         mode,
     )?;
     Ok(())
@@ -106,6 +133,20 @@ pub fn ensure_sandbox_user(
 ) -> Result<()> {
     ensure_local_user(username, password, new_user_flags, log)?;
     ensure_local_group_member(SANDBOX_USERS_GROUP, username)?;
+    Ok(())
+}
+
+/// Ensures one approved-read account. The account must never join the sandbox
+/// deny group; membership in the authorized group is the only grant that
+/// carries the approved-read ACEs.
+pub fn ensure_authorized_user(
+    username: &str,
+    password: &str,
+    new_user_flags: u32,
+    log: &mut dyn Write,
+) -> Result<()> {
+    ensure_local_user(username, password, new_user_flags, log)?;
+    ensure_local_group_member(crate::branding::AUTHORIZED_USERS_GROUP, username)?;
     Ok(())
 }
 
@@ -293,10 +334,17 @@ struct SandboxUserRecord {
 }
 
 #[derive(Serialize)]
+struct SandboxUserPair {
+    offline: SandboxUserRecord,
+    online: SandboxUserRecord,
+}
+
+#[derive(Serialize)]
 struct SandboxUsersFile {
     version: u32,
     offline: SandboxUserRecord,
     online: SandboxUserRecord,
+    authorized: SandboxUserPair,
 }
 
 #[derive(Serialize)]
@@ -312,12 +360,15 @@ struct SetupMarker {
     write_roots: Vec<PathBuf>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_secrets(
     codex_home: &Path,
     offline_user: &str,
     offline_pwd: &str,
     online_user: &str,
     online_pwd: &str,
+    authorized_offline_pwd: &str,
+    authorized_online_pwd: &str,
     mode: SetupMode,
 ) -> Result<()> {
     let secrets_dir = sandbox_secrets_dir(codex_home);
@@ -342,6 +393,20 @@ fn write_secrets(
             format!("dpapi protect failed for online user: {err}"),
         ))
     })?;
+    let authorized_offline_blob =
+        dpapi_protect(authorized_offline_pwd.as_bytes()).map_err(|err| {
+            anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperDpapiProtectFailed,
+                format!("dpapi protect failed for authorized offline user: {err}"),
+            ))
+        })?;
+    let authorized_online_blob =
+        dpapi_protect(authorized_online_pwd.as_bytes()).map_err(|err| {
+            anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperDpapiProtectFailed,
+                format!("dpapi protect failed for authorized online user: {err}"),
+            ))
+        })?;
     let users = SandboxUsersFile {
         version: SETUP_VERSION,
         offline: SandboxUserRecord {
@@ -351,6 +416,16 @@ fn write_secrets(
         online: SandboxUserRecord {
             username: online_user.to_string(),
             password: BASE64.encode(online_blob),
+        },
+        authorized: SandboxUserPair {
+            offline: SandboxUserRecord {
+                username: crate::branding::AUTHORIZED_OFFLINE_USERNAME.to_string(),
+                password: BASE64.encode(authorized_offline_blob),
+            },
+            online: SandboxUserRecord {
+                username: crate::branding::AUTHORIZED_ONLINE_USERNAME.to_string(),
+                password: BASE64.encode(authorized_online_blob),
+            },
         },
     };
     let users_path = secrets_dir.join("sandbox_users.json");

@@ -42,6 +42,33 @@ pub use crate::branding::OFFLINE_BLOCK_RULE_FRIENDLY;
 pub use crate::branding::OFFLINE_BLOCK_RULE_NAME;
 pub use crate::branding::OFFLINE_PROXY_ALLOW_RULE_NAME;
 const LOOPBACK_REMOTE_ADDRESSES: &str = "127.0.0.0/8,::/127";
+
+/// Stable rule names for one offline-shaped network identity. The sandbox and
+/// approved-read accounts each own a set so their rules never fight over the
+/// same name-keyed objects.
+pub(crate) struct OfflineRuleNames {
+    block_outbound: &'static str,
+    block_inbound: &'static str,
+    block_loopback_tcp: &'static str,
+    block_loopback_udp: &'static str,
+    proxy_allow: &'static str,
+}
+
+pub(crate) const OFFLINE_RULE_NAMES: OfflineRuleNames = OfflineRuleNames {
+    block_outbound: OFFLINE_BLOCK_RULE_NAME,
+    block_inbound: OFFLINE_BLOCK_INBOUND_RULE_NAME,
+    block_loopback_tcp: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+    block_loopback_udp: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
+    proxy_allow: OFFLINE_PROXY_ALLOW_RULE_NAME,
+};
+
+pub(crate) const AUTHORIZED_OFFLINE_RULE_NAMES: OfflineRuleNames = OfflineRuleNames {
+    block_outbound: crate::branding::AUTHORIZED_OFFLINE_BLOCK_RULE_NAME,
+    block_inbound: crate::branding::AUTHORIZED_OFFLINE_BLOCK_INBOUND_RULE_NAME,
+    block_loopback_tcp: crate::branding::AUTHORIZED_OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+    block_loopback_udp: crate::branding::AUTHORIZED_OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
+    proxy_allow: crate::branding::AUTHORIZED_OFFLINE_PROXY_ALLOW_RULE_NAME,
+};
 const NON_LOOPBACK_REMOTE_ADDRESSES: &str = "0.0.0.0-126.255.255.255,128.0.0.0-255.255.255.255,::,::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
 
 struct BlockRuleSpec<'a> {
@@ -90,6 +117,24 @@ pub fn ensure_offline_proxy_allowlist(
     allow_tcp_loopback: bool,
     log: &mut dyn Write,
 ) -> Result<()> {
+    ensure_offline_proxy_allowlist_for_rules(
+        &OFFLINE_RULE_NAMES,
+        offline_sid,
+        proxy_ports,
+        allow_local_binding,
+        allow_tcp_loopback,
+        log,
+    )
+}
+
+pub(crate) fn ensure_offline_proxy_allowlist_for_rules(
+    names: &OfflineRuleNames,
+    offline_sid: &str,
+    proxy_ports: &[u16],
+    allow_local_binding: bool,
+    allow_tcp_loopback: bool,
+    log: &mut dyn Write,
+) -> Result<()> {
     let local_user_spec = format!("O:LSD:(A;;CC;;;{offline_sid})");
 
     let _apartment = FirewallComApartment::initialize()?;
@@ -116,17 +161,17 @@ pub fn ensure_offline_proxy_allowlist(
                 // mode so stale proxy exceptions do not linger.
                 remove_rule_if_present(
                     &rules,
-                    &scoped_rule_name(OFFLINE_PROXY_ALLOW_RULE_NAME, allow_tcp_loopback),
+                    &scoped_rule_name(names.proxy_allow, allow_tcp_loopback),
                     log,
                 )?;
                 remove_rule_if_present(
                     &rules,
-                    &scoped_rule_name(OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME, allow_tcp_loopback),
+                    &scoped_rule_name(names.block_loopback_udp, allow_tcp_loopback),
                     log,
                 )?;
                 remove_rule_if_present(
                     &rules,
-                    &scoped_rule_name(OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME, allow_tcp_loopback),
+                    &scoped_rule_name(names.block_loopback_tcp, allow_tcp_loopback),
                     log,
                 )?;
                 return Ok(());
@@ -135,10 +180,7 @@ pub fn ensure_offline_proxy_allowlist(
             ensure_block_rule(
                 &rules,
                 &BlockRuleSpec {
-                    internal_name: &scoped_rule_name(
-                        OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
-                        allow_tcp_loopback,
-                    ),
+                    internal_name: &scoped_rule_name(names.block_loopback_udp, allow_tcp_loopback),
                     friendly_desc: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY,
                     direction: NET_FW_RULE_DIR_OUT,
                     protocol: NET_FW_IP_PROTOCOL_UDP.0,
@@ -153,14 +195,10 @@ pub fn ensure_offline_proxy_allowlist(
             if allow_tcp_loopback {
                 remove_rule_if_present(
                     &rules,
-                    &scoped_rule_name(OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME, true),
+                    &scoped_rule_name(names.block_loopback_tcp, true),
                     log,
                 )?;
-                remove_rule_if_present(
-                    &rules,
-                    &scoped_rule_name(OFFLINE_PROXY_ALLOW_RULE_NAME, true),
-                    log,
-                )?;
+                remove_rule_if_present(&rules, &scoped_rule_name(names.proxy_allow, true), log)?;
                 return Ok(());
             }
 
@@ -169,10 +207,7 @@ pub fn ensure_offline_proxy_allowlist(
             ensure_block_rule(
                 &rules,
                 &BlockRuleSpec {
-                    internal_name: &scoped_rule_name(
-                        OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
-                        allow_tcp_loopback,
-                    ),
+                    internal_name: &scoped_rule_name(names.block_loopback_tcp, allow_tcp_loopback),
                     friendly_desc: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
                     direction: NET_FW_RULE_DIR_OUT,
                     protocol: NET_FW_IP_PROTOCOL_TCP.0,
@@ -188,7 +223,7 @@ pub fn ensure_offline_proxy_allowlist(
             // place so transitions back to proxy-only mode do not fail open.
             remove_rule_if_present(
                 &rules,
-                &scoped_rule_name(OFFLINE_PROXY_ALLOW_RULE_NAME, allow_tcp_loopback),
+                &scoped_rule_name(names.proxy_allow, allow_tcp_loopback),
                 log,
             )?;
 
@@ -197,7 +232,7 @@ pub fn ensure_offline_proxy_allowlist(
                     &rules,
                     &BlockRuleSpec {
                         internal_name: &scoped_rule_name(
-                            OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+                            names.block_loopback_tcp,
                             allow_tcp_loopback,
                         ),
                         friendly_desc: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
@@ -217,6 +252,20 @@ pub fn ensure_offline_proxy_allowlist(
 }
 
 pub fn ensure_offline_network_blocks(
+    offline_sid: &str,
+    allow_tcp_loopback: bool,
+    log: &mut dyn Write,
+) -> Result<()> {
+    ensure_offline_network_blocks_for_rules(
+        &OFFLINE_RULE_NAMES,
+        offline_sid,
+        allow_tcp_loopback,
+        log,
+    )
+}
+
+pub(crate) fn ensure_offline_network_blocks_for_rules(
+    names: &OfflineRuleNames,
     offline_sid: &str,
     allow_tcp_loopback: bool,
     log: &mut dyn Write,
@@ -246,7 +295,7 @@ pub fn ensure_offline_network_blocks(
             ensure_block_rule(
                 &rules,
                 &BlockRuleSpec {
-                    internal_name: &scoped_rule_name(OFFLINE_BLOCK_RULE_NAME, allow_tcp_loopback),
+                    internal_name: &scoped_rule_name(names.block_outbound, allow_tcp_loopback),
                     friendly_desc: OFFLINE_BLOCK_RULE_FRIENDLY,
                     direction: NET_FW_RULE_DIR_OUT,
                     protocol: NET_FW_IP_PROTOCOL_ANY.0,
@@ -260,10 +309,7 @@ pub fn ensure_offline_network_blocks(
             ensure_block_rule(
                 &rules,
                 &BlockRuleSpec {
-                    internal_name: &scoped_rule_name(
-                        OFFLINE_BLOCK_INBOUND_RULE_NAME,
-                        allow_tcp_loopback,
-                    ),
+                    internal_name: &scoped_rule_name(names.block_inbound, allow_tcp_loopback),
                     friendly_desc: OFFLINE_BLOCK_INBOUND_RULE_FRIENDLY,
                     direction: NET_FW_RULE_DIR_IN,
                     protocol: NET_FW_IP_PROTOCOL_ANY.0,

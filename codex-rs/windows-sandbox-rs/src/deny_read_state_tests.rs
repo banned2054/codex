@@ -349,3 +349,155 @@ fn recovered_bookkeeping_tracks_repeated_calls_and_a_later_profile_change() -> R
     }
     Ok(())
 }
+
+/// The restore path: an empty desired grant set revokes every previously
+/// granted approved-read RX ACE and clears that principal's bookkeeping.
+#[test]
+fn authorized_grant_sync_revokes_previous_grants_on_empty_desired_set() -> Result<()> {
+    let temp = TempDir::new()?;
+    let state_dir = sandbox_dir(temp.path());
+    fs::create_dir(&state_dir)?;
+    let state_path = state_dir.join(AUTHORIZED_READ_ACL_STATE_FILE);
+    let approved = temp.path().join("approved");
+    let other = temp.path().join("other-approved");
+    fs::create_dir(&approved)?;
+    fs::create_dir(&other)?;
+    let sid_string = "S-1-5-21-10-20-30-41";
+    let sid = LocalSid::from_string(sid_string)?;
+    let rx_mask = winfs::FILE_GENERIC_READ | winfs::FILE_GENERIC_EXECUTE;
+
+    let granted = unsafe {
+        sync_persistent_authorized_read_grants(
+            temp.path(),
+            sid_string,
+            &[approved.clone(), other.clone()],
+            sid.as_ptr(),
+        )
+    }?;
+    assert_eq!(granted, vec![approved.clone(), other.clone()]);
+    for target in [&approved, &other] {
+        assert!(
+            crate::path_mask_allows(target, &[sid.as_ptr()], rx_mask, /*require_all_bits*/ true)?,
+            "approved read must be granted at {}",
+            target.display()
+        );
+    }
+    let stored: PersistentDenyReadAclState = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(
+        stored.principals,
+        BTreeMap::from([(sid_string.to_owned(), vec![approved.clone(), other.clone()])])
+    );
+
+    // Restore: desired set shrinks to only one path; the stale grant must go.
+    let granted = unsafe {
+        sync_persistent_authorized_read_grants(
+            temp.path(),
+            sid_string,
+            std::slice::from_ref(&approved),
+            sid.as_ptr(),
+        )
+    }?;
+    assert_eq!(granted, vec![approved.clone()]);
+    assert!(!crate::path_mask_allows(
+        &other,
+        &[sid.as_ptr()],
+        rx_mask,
+        /*require_all_bits*/ false
+    )?);
+
+    // Full restore: empty desired set revokes the remaining grant.
+    let restored = unsafe {
+        sync_persistent_authorized_read_grants(temp.path(), sid_string, &[], sid.as_ptr())
+    }?;
+    assert!(restored.is_empty());
+    assert!(!crate::path_mask_allows(
+        &approved,
+        &[sid.as_ptr()],
+        rx_mask,
+        /*require_all_bits*/ false
+    )?);
+    let stored: PersistentDenyReadAclState = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert!(stored.principals.is_empty());
+    Ok(())
+}
+
+/// Missing approved paths are skipped without materializing directories, and
+/// an empty effective grant set removes the bookkeeping entry.
+#[test]
+fn authorized_grant_sync_skips_missing_paths_without_materializing() -> Result<()> {
+    let temp = TempDir::new()?;
+    let state_dir = sandbox_dir(temp.path());
+    fs::create_dir(&state_dir)?;
+    let state_path = state_dir.join(AUTHORIZED_READ_ACL_STATE_FILE);
+    let missing = temp.path().join("not-created-yet");
+    let sid_string = "S-1-5-21-10-20-30-42";
+    let sid = LocalSid::from_string(sid_string)?;
+
+    let granted = unsafe {
+        sync_persistent_authorized_read_grants(
+            temp.path(),
+            sid_string,
+            std::slice::from_ref(&missing),
+            sid.as_ptr(),
+        )
+    }?;
+    assert!(granted.is_empty());
+    assert!(!missing.exists(), "grant sync must not create directories");
+    let stored: PersistentDenyReadAclState = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert!(stored.principals.is_empty());
+    Ok(())
+}
+
+/// A failed revocation must propagate and keep the bookkeeping entry so the next
+/// sync retries it; a retry after the blocker clears converges to an empty set.
+#[test]
+fn revocation_failure_propagates_and_keeps_bookkeeping_for_retry() -> Result<()> {
+    let temp = TempDir::new()?;
+    let state_dir = sandbox_dir(temp.path());
+    fs::create_dir(&state_dir)?;
+    let state_path = state_dir.join(AUTHORIZED_READ_ACL_STATE_FILE);
+    let approved = temp.path().join("approved");
+    fs::create_dir(&approved)?;
+    let sid_string = "S-1-5-21-10-20-30-43";
+    let sid = LocalSid::from_string(sid_string)?;
+
+    let granted = unsafe {
+        sync_persistent_authorized_read_grants(
+            temp.path(),
+            sid_string,
+            std::slice::from_ref(&approved),
+            sid.as_ptr(),
+        )
+    }?;
+    assert_eq!(granted, vec![approved.clone()]);
+
+    // Deleting the target makes revoke_ace fail (the security info of a missing path
+    // cannot be read), which must surface instead of being reported as success.
+    fs::remove_dir(&approved)?;
+    let error = unsafe {
+        sync_persistent_authorized_read_grants(temp.path(), sid_string, &[], sid.as_ptr())
+    }
+    .expect_err("revocation failure must propagate");
+    assert!(
+        format!("{error:#}").contains("revoke stale ACE"),
+        "unexpected error: {error:#}"
+    );
+
+    // The bookkeeping still records the path so the next sync retries the revocation.
+    let stored: PersistentDenyReadAclState = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert_eq!(
+        stored.principals[sid_string],
+        vec![approved.clone()],
+        "bookkeeping must survive a failed revocation"
+    );
+
+    // Recreating the path lets the retry converge to the empty desired set.
+    fs::create_dir(&approved)?;
+    let restored = unsafe {
+        sync_persistent_authorized_read_grants(temp.path(), sid_string, &[], sid.as_ptr())
+    }?;
+    assert!(restored.is_empty());
+    let stored: PersistentDenyReadAclState = serde_json::from_slice(&fs::read(&state_path)?)?;
+    assert!(stored.principals.is_empty());
+    Ok(())
+}

@@ -243,6 +243,7 @@ fn account_logon_error(error: io::Error) -> anyhow::Error {
 fn select_identity(
     network_identity: SandboxNetworkIdentity,
     codex_home: &Path,
+    /*authorized*/ approved_read: bool,
 ) -> Result<Option<SandboxIdentity>> {
     let _marker = match load_marker(codex_home)? {
         Some(m) if m.version_matches() => m,
@@ -252,14 +253,46 @@ fn select_identity(
         Some(u) if u.version_matches() => u,
         _ => return Ok(None),
     };
-    let chosen = match network_identity {
-        SandboxNetworkIdentity::Offline => users.offline,
-        SandboxNetworkIdentity::Online => users.online,
+    let offline = network_identity.uses_offline_identity();
+    let chosen = if approved_read {
+        let Some(record) = users.authorized_record(offline) else {
+            return Ok(None);
+        };
+        record.clone()
+    } else {
+        match network_identity {
+            SandboxNetworkIdentity::Offline => users.offline,
+            SandboxNetworkIdentity::Online => users.online,
+        }
     };
     let password = decode_password(&chosen)?;
     Ok(Some(SandboxIdentity {
         username: chosen.username,
         password,
+    }))
+}
+
+/// Reads the approved-read account credentials for one network identity.
+///
+/// Returns None when setup artifacts are missing, incompatible with the
+/// current setup version, or the approved-read pair was never provisioned.
+/// Callers must drive the approved-read ACL refresh separately.
+pub fn authorized_sandbox_creds(
+    codex_home: &Path,
+    offline_network_identity: bool,
+) -> Result<Option<SandboxCreds>> {
+    let identity = select_identity(
+        if offline_network_identity {
+            SandboxNetworkIdentity::Offline
+        } else {
+            SandboxNetworkIdentity::Online
+        },
+        codex_home,
+        /*authorized*/ true,
+    )?;
+    Ok(identity.map(|identity| SandboxCreds {
+        username: identity.username,
+        password: identity.password,
     }))
 }
 
@@ -355,7 +388,7 @@ fn require_sandbox_account_with_setup(
                 setup_reason = Some(reason);
                 None
             } else {
-                let selected = select_identity(network_identity, codex_home)?;
+                let selected = select_identity(network_identity, codex_home, /*authorized*/ false)?;
                 if selected.is_none() {
                     setup_reason = Some(
                         "sandbox users missing or incompatible with marker version".to_string(),
@@ -418,7 +451,7 @@ fn require_sandbox_account_with_setup(
                 );
             }
         }
-        identity = select_identity(network_identity, codex_home)?;
+        identity = select_identity(network_identity, codex_home, /*authorized*/ false)?;
     }
     let identity = identity.ok_or_else(|| {
         anyhow!(

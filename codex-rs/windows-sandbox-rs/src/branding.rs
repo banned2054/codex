@@ -24,6 +24,34 @@ pub const TCP_LOOPBACK_SETUP_VERSION: u32 = 6;
 pub const SANDBOX_USERS_GROUP: &str = "TinyHarnessUsers";
 pub const SANDBOX_USERS_GROUP_COMMENT: &str = "TinyHarness sandbox internal group (managed)";
 
+// Approved-read principals. The authorized group deliberately stays outside
+// SANDBOX_USERS_GROUP so the persistent deny ACEs owned by the sandbox group
+// can never shadow a grant made to the authorized group.
+pub const AUTHORIZED_OFFLINE_USERNAME: &str = "TinyHarnessAuthOff";
+pub const AUTHORIZED_ONLINE_USERNAME: &str = "TinyHarnessAuthOn";
+pub const AUTHORIZED_USERS_GROUP: &str = "TinyHarnessAuthUsers";
+pub const AUTHORIZED_USERS_GROUP_COMMENT: &str =
+    "TinyHarness sandbox approved-read group (managed)";
+
+// Setup protocol versions accepted by this helper. Version 5 is the pre-approved-read
+// legacy contract, 6 is the TCP loopback contract, and 7 carries the approved-read
+// payload field. Approved-read requests require version 7.
+pub const LEGACY_SETUP_VERSION: u32 = 5;
+
+// Firewall rule lookup names for the authorized offline identity. These mirror the
+// offline rules per account; rules are keyed by name, so the authorized account needs
+// its own stable names instead of rewriting the sandbox account's rules.
+pub const AUTHORIZED_OFFLINE_BLOCK_RULE_NAME: &str =
+    "tinyharness_authorized_offline_block_outbound";
+pub const AUTHORIZED_OFFLINE_BLOCK_INBOUND_RULE_NAME: &str =
+    "tinyharness_authorized_offline_block_inbound";
+pub const AUTHORIZED_OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME: &str =
+    "tinyharness_authorized_offline_block_loopback_tcp";
+pub const AUTHORIZED_OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME: &str =
+    "tinyharness_authorized_offline_block_loopback_udp";
+pub const AUTHORIZED_OFFLINE_PROXY_ALLOW_RULE_NAME: &str =
+    "tinyharness_authorized_offline_allow_loopback_proxy";
+
 // Firewall rule lookup names. These are the stable identifiers used to find
 // and update the rules idempotently; they intentionally do not change between
 // installs of this fork.

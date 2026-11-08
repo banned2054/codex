@@ -293,6 +293,8 @@ pub use hide_users::hide_newly_created_users;
 #[cfg(target_os = "windows")]
 pub use identity::SandboxAccountCredentialMismatch;
 #[cfg(target_os = "windows")]
+pub use identity::authorized_sandbox_creds;
+#[cfg(target_os = "windows")]
 pub use identity::logon_existing_sandbox_account;
 #[cfg(target_os = "windows")]
 pub use identity::require_logon_sandbox_creds;
@@ -522,6 +524,10 @@ pub use windows_impl::run_windows_sandbox_legacy_preflight;
 pub use winutil::SANDBOX_USERS_GROUP;
 #[cfg(target_os = "windows")]
 pub use winutil::account_name_from_sid;
+#[cfg(target_os = "windows")]
+pub use winutil::ensure_local_group;
+#[cfg(target_os = "windows")]
+pub use winutil::ensure_sandbox_authorized_users_group;
 #[cfg(target_os = "windows")]
 pub use winutil::ensure_sandbox_users_group;
 #[cfg(target_os = "windows")]

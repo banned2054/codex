@@ -24,6 +24,7 @@ use windows_sys::Win32::Foundation as win;
 use windows_sys::Win32::Storage::FileSystem as winfs;
 
 const DENY_READ_ACL_STATE_FILE: &str = "deny_read_acl_state.json";
+const AUTHORIZED_READ_ACL_STATE_FILE: &str = "authorized_read_acl_state.json";
 
 #[derive(Default, Deserialize, Serialize)]
 struct PersistentDenyReadAclState {
@@ -49,7 +50,63 @@ pub unsafe fn sync_persistent_deny_read_acls(
     desired_paths: &[PathBuf],
     psid: *mut c_void,
 ) -> Result<Vec<PathBuf>> {
-    let state_path = sandbox_dir(codex_home).join(DENY_READ_ACL_STATE_FILE);
+    unsafe {
+        sync_persistent_principal_paths(
+            codex_home,
+            DENY_READ_ACL_STATE_FILE,
+            principal_sid,
+            desired_paths,
+            psid,
+            apply_deny_read_acls,
+        )
+    }
+}
+
+/// Reconciles the persistent RX grants owned by the authorized principal.
+///
+/// Approved-read grants are additive exceptions, so unlike `read_roots` they
+/// must be revocable: each call applies the desired grant set first and then
+/// revokes every previously granted path that is no longer desired. An empty
+/// desired set therefore fully restores the authorized principal while still
+/// keeping the deny bookkeeping authoritative. Missing paths are skipped
+/// without materializing anything, so the grant set tracks what actually
+/// exists on disk.
+///
+/// # Safety
+/// Caller must pass a valid SID pointer matching `principal_sid`.
+pub(crate) unsafe fn sync_persistent_authorized_read_grants(
+    codex_home: &Path,
+    principal_sid: &str,
+    desired_paths: &[PathBuf],
+    psid: *mut c_void,
+) -> Result<Vec<PathBuf>> {
+    unsafe {
+        sync_persistent_principal_paths(
+            codex_home,
+            AUTHORIZED_READ_ACL_STATE_FILE,
+            principal_sid,
+            desired_paths,
+            psid,
+            apply_authorized_read_grants,
+        )
+    }
+}
+
+/// Shared per-principal reconcile: apply the desired set, revoke stale paths
+/// recorded for the same SID in `state_file`, then persist the new bookkeeping.
+///
+/// # Safety
+/// Caller must pass a valid SID pointer matching `principal_sid`; `apply` must
+/// be safe to call with the same pointer.
+unsafe fn sync_persistent_principal_paths(
+    codex_home: &Path,
+    state_file: &str,
+    principal_sid: &str,
+    desired_paths: &[PathBuf],
+    psid: *mut c_void,
+    apply: unsafe fn(&[PathBuf], *mut c_void) -> Result<Vec<PathBuf>>,
+) -> Result<Vec<PathBuf>> {
+    let state_path = sandbox_dir(codex_home).join(state_file);
     let mut state = load_state(&state_path)?;
     let previous_paths = state
         .principals
@@ -57,15 +114,25 @@ pub unsafe fn sync_persistent_deny_read_acls(
         .cloned()
         .unwrap_or_default();
 
-    let applied_paths = unsafe { apply_deny_read_acls(desired_paths, psid) }?;
+    let applied_paths = unsafe { apply(desired_paths, psid) }?;
     let desired_keys = applied_paths
         .iter()
         .map(|path| lexical_path_key(path))
         .collect::<HashSet<_>>();
 
+    // Revocation failures must never be reported as success: a stale grant (or deny)
+    // ACE that survives keeps the principal's effective surface wider than the
+    // bookkeeping claims. The bookkeeping is left untouched on failure so the next
+    // sync retries the same revocation; revoke_ace is idempotent for ACEs that are
+    // already gone, so retrying previously revoked paths is safe.
     for path in previous_paths {
         if !desired_keys.contains(&lexical_path_key(&path)) {
-            let _ = revoke_ace(&path, psid);
+            revoke_ace(&path, psid).with_context(|| {
+                format!(
+                    "revoke stale ACE for {principal_sid} at {}",
+                    path.display()
+                )
+            })?;
         }
     }
 
@@ -79,6 +146,56 @@ pub unsafe fn sync_persistent_deny_read_acls(
     store_state(&state_path, &state)?;
 
     Ok(applied_paths)
+}
+
+/// Applies RX grant ACEs for the desired authorized paths without
+/// materializing missing ones, mirroring the deny planner's lexical-plus-
+/// canonical coverage. On a mid-way failure the grants added by this call are
+/// revoked before the error is returned so bookkeeping stays consistent.
+///
+/// # Safety
+/// Caller must pass a valid SID pointer for the authorized principal.
+unsafe fn apply_authorized_read_grants(
+    paths: &[PathBuf],
+    psid: *mut c_void,
+) -> Result<Vec<PathBuf>> {
+    let planned = crate::deny_read_acl::plan_deny_read_acl_paths(paths)?;
+    // Annotation pins the element type before the `revoke_ace` coercion below
+    // can lock inference onto the unsized `&Path` target.
+    let mut applied: Vec<PathBuf> = Vec::new();
+    for path in planned {
+        if !path.exists() {
+            continue;
+        }
+        let result = unsafe {
+            crate::acl::grant_read_execute_aces(
+                &path,
+                &[psid],
+                windows_sys::Win32::Security::OBJECT_INHERIT_ACE
+                    | windows_sys::Win32::Security::CONTAINER_INHERIT_ACE,
+            )
+        }
+        .with_context(|| format!("grant authorized-read ACE to {}", path.display()));
+        if let Err(err) = result {
+            // Roll back the grants this call added; a rollback failure is folded into
+            // the error so an orphaned RX ACE is never hidden behind a bare failure.
+            let mut rollback_errors = Vec::new();
+            for added_path in &applied {
+                if let Err(revoke_err) = revoke_ace(added_path, psid) {
+                    rollback_errors.push(format!("{}: {revoke_err:#}", added_path.display()));
+                }
+            }
+            if rollback_errors.is_empty() {
+                return Err(err);
+            }
+            return Err(err.context(format!(
+                "revoking partially applied authorized-read grants failed: {}",
+                rollback_errors.join("; ")
+            )));
+        }
+        applied.push(path);
+    }
+    Ok(applied)
 }
 
 fn load_state(path: &Path) -> Result<PersistentDenyReadAclState> {

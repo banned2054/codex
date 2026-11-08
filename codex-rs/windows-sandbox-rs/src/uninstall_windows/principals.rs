@@ -40,6 +40,8 @@ impl DisabledSandboxUsers {
             ONLINE_USERNAME,
             crate::branding::TCP_LOOPBACK_OFFLINE_USERNAME,
             crate::branding::TCP_LOOPBACK_ONLINE_USERNAME,
+            crate::branding::AUTHORIZED_OFFLINE_USERNAME,
+            crate::branding::AUTHORIZED_ONLINE_USERNAME,
         ] {
             let Some(original_flags) = local_user_flags(name)? else {
                 continue;
@@ -66,6 +68,8 @@ impl DisabledSandboxUsers {
             ONLINE_USERNAME,
             crate::branding::TCP_LOOPBACK_OFFLINE_USERNAME,
             crate::branding::TCP_LOOPBACK_ONLINE_USERNAME,
+            crate::branding::AUTHORIZED_OFFLINE_USERNAME,
+            crate::branding::AUTHORIZED_ONLINE_USERNAME,
         ] {
             let Some(flags) = local_user_flags(name)? else {
                 continue;

@@ -498,11 +498,26 @@ pub struct SandboxUsersFile {
     pub version: u32,
     pub offline: SandboxUserRecord,
     pub online: SandboxUserRecord,
+    /// Approved-read account pair provisioned alongside the sandbox pair.
+    /// Written by setup protocol 7; absent in legacy secret files.
+    #[serde(default)]
+    pub authorized: Option<SandboxUserPair>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxUserPair {
+    pub offline: SandboxUserRecord,
+    pub online: SandboxUserRecord,
 }
 
 impl SandboxUsersFile {
     pub fn version_matches(&self) -> bool {
         self.version == SETUP_VERSION
+    }
+
+    /// Returns the approved-read record for one network identity, if provisioned.
+    pub fn authorized_record(&self, offline: bool) -> Option<&SandboxUserRecord> {
+        self.authorized.as_ref().map(|pair| if offline { &pair.offline } else { &pair.online })
     }
 }
 

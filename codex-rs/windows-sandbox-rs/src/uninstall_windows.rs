@@ -161,7 +161,12 @@ impl PreparedWindowsSandboxCleanup {
             ("remove firewall rules", firewall::cleanup_firewall_rules()),
             (
                 "remove hidden-user entries",
-                crate::hide_users::unhide_sandbox_users(&[OFFLINE_USERNAME, ONLINE_USERNAME]),
+                crate::hide_users::unhide_sandbox_users(&[
+                    OFFLINE_USERNAME,
+                    ONLINE_USERNAME,
+                    crate::branding::AUTHORIZED_OFFLINE_USERNAME,
+                    crate::branding::AUTHORIZED_ONLINE_USERNAME,
+                ]),
             ),
         ] {
             match result {
@@ -188,6 +193,13 @@ impl PreparedWindowsSandboxCleanup {
                 Ok(()) => report("remove sandbox group: completed"),
                 Err(error) => {
                     report(&format!("remove sandbox group: failed, {error:#}"));
+                    errors.push(format!("{error:#}"));
+                }
+            }
+            match principals::remove_sandbox_principal(crate::branding::AUTHORIZED_USERS_GROUP) {
+                Ok(()) => report("remove authorized sandbox group: completed"),
+                Err(error) => {
+                    report(&format!("remove authorized sandbox group: failed, {error:#}"));
                     errors.push(format!("{error:#}"));
                 }
             }

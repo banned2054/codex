@@ -96,6 +96,7 @@ fn credential_setup_repairs_expired_accounts_once_and_reloads_credentials() -> R
                 username: ONLINE_USERNAME.into(),
                 password: BASE64.encode(crate::dpapi::protect(b"old-test-password")?),
             },
+            authorized: None,
         };
         for (path, bytes) in [
             (setup_marker_path(home.path()), serde_json::to_vec(&marker)?),
@@ -199,6 +200,7 @@ fn credential_setup_reconciles_policy_and_repairs_accounts() -> Result<()> {
                 username: marker.online_username.clone(),
                 ..user
             },
+            authorized: None,
         };
         let marker_bytes = serde_json::to_vec(&marker)?;
         for (path, bytes) in [
