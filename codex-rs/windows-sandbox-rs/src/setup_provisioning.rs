@@ -16,6 +16,7 @@ use crate::SetupRuntime;
 use crate::acquire_sandbox_setup_lock;
 use crate::add_deny_write_ace;
 use crate::convert_string_sid_to_sid;
+use crate::deny_read_state::sync_persistent_authorized_read_grants;
 use crate::ensure_allow_mask_aces_with_inheritance;
 use crate::ensure_allow_write_aces;
 use crate::extract_setup_failure;
@@ -37,7 +38,6 @@ use crate::setup_acl_error::record_acl_failure;
 use crate::setup_error_path;
 use crate::setup_log_writer;
 use crate::string_from_sid_bytes;
-use crate::deny_read_state::sync_persistent_authorized_read_grants;
 use crate::sync_persistent_deny_read_acls;
 use crate::to_wide;
 use crate::workspace_write_cap_sid_for_root;
@@ -1068,43 +1068,15 @@ fn sync_authorized_read_acls(
             LocalFree(psid as HLOCAL);
         }
     };
-    let mut reconcile = || -> Result<()> {
-        // Grant reconciliation runs BEFORE the deny reconciliation: both drive the same
-        // principal on the same paths, and revoke_ace deletes every explicit ACE for a
-        // SID regardless of type (REVOKE_ACCESS). Deny-first ordering would re-apply the
-        // full deny (including a path losing its approval) and then delete that fresh
-        // deny ACE while revoking the stale grant, silently widening the authorized
-        // principal's read surface while reporting success. Grants-first revokes the
-        // stale RX while the path carries no deny for this principal, and the deny set
-        // then lands on top and stays.
-        unsafe {
-            sync_persistent_authorized_read_grants(
-                &payload.codex_home,
-                &authorized_group_sid_str,
-                &payload.authorized_read_paths,
-                authorized_group_psid,
-            )
-        }
-        .context("apply approved-read grants")?;
-        let desired_deny = crate::authorized_paths::authorized_deny_read_paths(
-            &payload.deny_read_paths,
-            &payload.authorized_read_paths,
-        );
-        unsafe {
-            sync_persistent_deny_read_acls(
-                &payload.codex_home,
-                &authorized_group_sid_str,
-                &desired_deny,
-                authorized_group_psid,
-            )
-        }
-        .context("apply authorized-principal deny-read ACLs")?;
-        if authorized_execution {
-            grant_authorized_baseline_read_roots(payload, authorized_group_psid, log)?;
-        }
-        Ok(())
-    };
-    match reconcile() {
+    let reconcile =
+        reconcile_authorized_read_acls(payload, &authorized_group_sid_str, authorized_group_psid)
+            .and_then(|()| {
+                if authorized_execution {
+                    grant_authorized_baseline_read_roots(payload, authorized_group_psid, log)?;
+                }
+                Ok(())
+            });
+    match reconcile {
         Ok(()) => Ok(Some(AuthorizedGroupPrincipal {
             sid_str: authorized_group_sid_str,
             psid: authorized_group_psid,
@@ -1114,6 +1086,52 @@ fn sync_authorized_read_acls(
             Err(err)
         }
     }
+}
+
+fn reconcile_authorized_read_acls(
+    payload: &Payload,
+    principal_sid: &str,
+    principal_psid: *mut c_void,
+) -> Result<()> {
+    // Clear previous grants before restoring denies. Remove stale read-deny
+    // ACEs before adding grants so the existing deny-preservation check sees
+    // the remaining deny set.
+    unsafe {
+        sync_persistent_authorized_read_grants(
+            &payload.codex_home,
+            principal_sid,
+            &[],
+            principal_psid,
+        )
+    }
+    .context("revoke previous approved-read grants")?;
+
+    let desired_deny = crate::authorized_paths::authorized_deny_read_paths(
+        &payload.deny_read_paths,
+        &payload.authorized_read_paths,
+    );
+    unsafe {
+        sync_persistent_deny_read_acls(
+            &payload.codex_home,
+            principal_sid,
+            &desired_deny,
+            principal_psid,
+        )
+    }
+    .context("apply authorized-principal deny-read ACLs")?;
+
+    if !payload.authorized_read_paths.is_empty() {
+        unsafe {
+            sync_persistent_authorized_read_grants(
+                &payload.codex_home,
+                principal_sid,
+                &payload.authorized_read_paths,
+                principal_psid,
+            )
+        }
+        .context("apply approved-read grants")?;
+    }
+    Ok(())
 }
 
 /// Grants the baseline read surface to the authorized principal so an

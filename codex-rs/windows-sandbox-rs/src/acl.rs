@@ -35,6 +35,7 @@ use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_SID;
 use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_UNKNOWN;
 use windows_sys::Win32::Security::Authorization::TRUSTEE_W;
 use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+use windows_sys::Win32::Security::DeleteAce;
 use windows_sys::Win32::Security::EqualSid;
 use windows_sys::Win32::Security::GENERIC_MAPPING;
 use windows_sys::Win32::Security::GetAce;
@@ -109,6 +110,10 @@ pub unsafe fn fetch_dacl_handle(path: &Path) -> Result<(*mut ACL, *mut c_void)> 
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .with_context(|| format!("open ACL target {}", path.display()))?;
+    read_file_dacl(&handle, path)
+}
+
+unsafe fn read_file_dacl(handle: &std::fs::File, path: &Path) -> Result<(*mut ACL, *mut c_void)> {
     let mut p_sd: *mut c_void = std::ptr::null_mut();
     let mut p_dacl: *mut ACL = std::ptr::null_mut();
     let code = GetSecurityInfo(
@@ -1019,7 +1024,7 @@ pub unsafe fn add_deny_read_ace(path: &Path, psid: *mut c_void) -> Result<bool> 
 #[path = "acl_tests.rs"]
 mod tests;
 
-/// Removes explicit ACEs for one SID and propagates the updated inherited ACL.
+/// Removes explicit allow ACEs for one SID and propagates the updated inherited ACL.
 ///
 /// # Safety
 /// Caller must pass a valid SID pointer and have authority to edit the target DACL.
@@ -1088,6 +1093,64 @@ pub unsafe fn revoke_ace(path: &Path, psid: *mut c_void) -> Result<()> {
     }
     if !p_sd.is_null() {
         LocalFree(p_sd as HLOCAL);
+    }
+    result
+}
+
+/// Removes the explicit read-deny ACEs added for this SID by `add_deny_read_ace`.
+/// Keeps inherited ACEs, grants and denies for other masks or SIDs.
+///
+/// # Safety
+/// Caller must pass a valid SID pointer and own the read-deny entries at `path`.
+pub(crate) unsafe fn revoke_read_deny_aces(path: &Path, psid: *mut c_void) -> Result<()> {
+    let handle = OpenOptions::new()
+        .access_mode(READ_CONTROL | WRITE_DAC)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .with_context(|| format!("open stale read-deny ACL target {}", path.display()))?;
+    ensure_handle_is_not_filesystem_root(&handle, path)?;
+    let (dacl, descriptor) = read_file_dacl(&handle, path)?;
+    let result = (|| -> Result<()> {
+        if dacl.is_null() {
+            return Ok(());
+        }
+        let original_count = (*dacl).AceCount;
+        // Walk backwards so removing one ACE preserves the remaining indices and order.
+        for index in (0..u32::from(original_count)).rev() {
+            let mut entry = std::ptr::null_mut();
+            if GetAce(dacl, index, &mut entry) == 0 {
+                return Err(std::io::Error::last_os_error()).context("read stale deny ACL entry");
+            }
+            let header = &*entry.cast::<ACE_HEADER>();
+            if header.AceType != ACCESS_DENIED_ACE_TYPE || header.AceFlags & INHERITED_ACE != 0 {
+                continue;
+            }
+            let ace = &*entry.cast::<ACCESS_DENIED_ACE>();
+            // Windows can store the generic read bit or its mapped file-read mask.
+            if (ace.Mask == DenyAceKind::Read.mask() || ace.Mask == FILE_GENERIC_READ)
+                && EqualSid(std::ptr::addr_of!(ace.SidStart) as *mut c_void, psid) != 0
+                && DeleteAce(dacl, index) == 0
+            {
+                return Err(std::io::Error::last_os_error()).context("remove stale read-deny ACE");
+            }
+        }
+        if (*dacl).AceCount != original_count {
+            let code = SetSecurityInfo(
+                handle.as_raw_handle() as _,
+                1,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            );
+            acl_api_result(path, "SetSecurityInfo", code)?;
+        }
+        Ok(())
+    })();
+    if !descriptor.is_null() {
+        LocalFree(descriptor as HLOCAL);
     }
     result
 }

@@ -1,4 +1,5 @@
 use crate::acl::revoke_ace;
+use crate::acl::revoke_read_deny_aces;
 use crate::deny_read_acl::apply_deny_read_acls;
 use crate::deny_read_acl::lexical_path_key;
 use crate::setup::sandbox_dir;
@@ -58,6 +59,7 @@ pub unsafe fn sync_persistent_deny_read_acls(
             desired_paths,
             psid,
             apply_deny_read_acls,
+            revoke_read_deny_aces,
         )
     }
 }
@@ -88,6 +90,7 @@ pub(crate) unsafe fn sync_persistent_authorized_read_grants(
             desired_paths,
             psid,
             apply_authorized_read_grants,
+            revoke_ace,
         )
     }
 }
@@ -96,8 +99,8 @@ pub(crate) unsafe fn sync_persistent_authorized_read_grants(
 /// recorded for the same SID in `state_file`, then persist the new bookkeeping.
 ///
 /// # Safety
-/// Caller must pass a valid SID pointer matching `principal_sid`; `apply` must
-/// be safe to call with the same pointer.
+/// Caller must pass a valid SID pointer matching `principal_sid`; `apply` and
+/// `revoke` must accept that pointer and manage the same ACE type.
 unsafe fn sync_persistent_principal_paths(
     codex_home: &Path,
     state_file: &str,
@@ -105,6 +108,7 @@ unsafe fn sync_persistent_principal_paths(
     desired_paths: &[PathBuf],
     psid: *mut c_void,
     apply: unsafe fn(&[PathBuf], *mut c_void) -> Result<Vec<PathBuf>>,
+    revoke: unsafe fn(&Path, *mut c_void) -> Result<()>,
 ) -> Result<Vec<PathBuf>> {
     let state_path = sandbox_dir(codex_home).join(state_file);
     let mut state = load_state(&state_path)?;
@@ -123,15 +127,12 @@ unsafe fn sync_persistent_principal_paths(
     // Revocation failures must never be reported as success: a stale grant (or deny)
     // ACE that survives keeps the principal's effective surface wider than the
     // bookkeeping claims. The bookkeeping is left untouched on failure so the next
-    // sync retries the same revocation; revoke_ace is idempotent for ACEs that are
+    // sync retries the same revocation; both revokers are idempotent for ACEs that are
     // already gone, so retrying previously revoked paths is safe.
     for path in previous_paths {
         if !desired_keys.contains(&lexical_path_key(&path)) {
-            revoke_ace(&path, psid).with_context(|| {
-                format!(
-                    "revoke stale ACE for {principal_sid} at {}",
-                    path.display()
-                )
+            revoke(&path, psid).with_context(|| {
+                format!("revoke stale ACE for {principal_sid} at {}", path.display())
             })?;
         }
     }

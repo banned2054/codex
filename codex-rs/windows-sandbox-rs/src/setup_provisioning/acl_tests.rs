@@ -192,74 +192,65 @@ fn lock_sandbox_dir_blocks_inherited_write_for_runner_files() {
     }
 }
 
-/// Regression for the restore ordering: grants reconcile BEFORE the deny set, so
-/// revoking a stale grant can never delete the deny ACE that the restore just
-/// re-applied on the same path (revoke_ace deletes every explicit ACE for a SID
-/// regardless of type). The machine must have provisioned the authorized group
-/// (full provisioning does); without it the test stays inconclusive.
 #[test]
-fn authorized_restore_keeps_fresh_deny_over_stale_grant_revocation() -> anyhow::Result<()> {
+fn authorized_read_survives_reapproval_and_restores_deny_each_time() -> anyhow::Result<()> {
     use windows_sys::Win32::Foundation as win;
 
-    use super::sync_authorized_read_acls;
+    use super::reconcile_authorized_read_acls;
     use crate::acl::{dacl_has_read_deny_for_sid, fetch_dacl_handle};
+    use crate::token::LocalSid;
 
-    use tempfile::TempDir;
-    let group_sid_bytes = match resolve_sid(crate::branding::AUTHORIZED_USERS_GROUP) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            // The authorized group is a provisioning product; unit scope ends where
-            // provisioning has not run.
-            return Ok(());
-        }
-    };
-    let group_psid = super::sid_bytes_to_psid(&group_sid_bytes)?;
+    let principal_sid = "S-1-5-21-10-20-30-44";
+    let group = LocalSid::from_string(principal_sid)?;
+    let group_psid = group.as_ptr();
     let rx_mask = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 
-    let home = TempDir::new()?;
-    std::fs::create_dir_all(crate::setup::sandbox_dir(home.path()))?;
+    let home = tempfile::tempdir()?;
+    fs::create_dir_all(crate::setup::sandbox_dir(home.path()))?;
     let approved = home.path().join("approved");
-    std::fs::create_dir(&approved)?;
+    let unapproved = home.path().join("unapproved");
+    fs::create_dir(&approved)?;
+    fs::create_dir(&unapproved)?;
+    let approved_file = approved.join("fixture.txt");
+    fs::write(&approved_file, b"approved fixture")?;
 
     let mut value = super::tests::payload_json();
     value["codex_home"] = serde_json::json!(home.path());
-    value["deny_read_paths"] = serde_json::json!([approved.to_string_lossy()]);
-    value["authorized_read_paths"] = serde_json::json!([approved.to_string_lossy()]);
-    let grant_payload: Payload = serde_json::from_value(value)?;
-
-    let mut log: Vec<u8> = Vec::new();
-    sync_authorized_read_acls(&grant_payload, &mut log)?;
-    assert!(
-        path_mask_allows(&approved, &[group_psid], rx_mask, true)?,
-        "the approved read must be granted on the authorized principal"
-    );
-
-    // Restore: the same path leaves the authorized set. The deny lands again and must
-    // survive the stale-grant revocation that follows it under the fixed ordering.
-    let mut restore = super::tests::payload_json();
-    restore["codex_home"] = serde_json::json!(home.path());
-    restore["deny_read_paths"] = serde_json::json!([approved.to_string_lossy()]);
-    restore["authorized_read_paths"] = serde_json::json!([]);
-    let restore_payload: Payload = serde_json::from_value(restore)?;
-
-    sync_authorized_read_acls(&restore_payload, &mut log)?;
-
-    let outcome = unsafe {
-        let (dacl, descriptor) = fetch_dacl_handle(&approved)?;
-        let denied = dacl_has_read_deny_for_sid(dacl, group_psid);
-        win::LocalFree(descriptor as win::HLOCAL);
-        denied
+    value["deny_read_paths"] = serde_json::json!([approved, unapproved]);
+    let mut payload: Payload = serde_json::from_value(value)?;
+    let has_deny = |path: &std::path::Path| -> anyhow::Result<bool> {
+        unsafe {
+            let (dacl, descriptor) = fetch_dacl_handle(path)?;
+            let denied = dacl_has_read_deny_for_sid(dacl, group_psid);
+            win::LocalFree(descriptor as win::HLOCAL);
+            Ok(denied)
+        }
     };
-    assert!(
-        outcome,
-        "the restored deny must survive the stale-grant revocation on {}",
-        approved.display()
-    );
-    assert!(
-        !path_mask_allows(&approved, &[group_psid], rx_mask, false)?,
-        "the revoked grant must no longer allow approved reads"
-    );
 
-    unsafe { win::LocalFree(group_psid as win::HLOCAL) };
+    for cycle in 1..=2 {
+        payload.authorized_read_paths = vec![approved.clone()];
+        reconcile_authorized_read_acls(&payload, principal_sid, group_psid)?;
+        for path in [&approved, &approved_file] {
+            let allowed = path_mask_allows(path, &[group_psid], rx_mask, true)?;
+            let denied = has_deny(path)?;
+            assert!(
+                allowed && !denied,
+                "cycle {cycle}: {} must retain its approved grant (allow={allowed}, deny={denied})",
+                path.display()
+            );
+        }
+        assert!(has_deny(&unapproved)?);
+
+        payload.authorized_read_paths.clear();
+        reconcile_authorized_read_acls(&payload, principal_sid, group_psid)?;
+        for path in [&approved, &approved_file] {
+            assert!(has_deny(path)?, "cycle {cycle}: the deny must be restored");
+            assert!(
+                !path_mask_allows(path, &[group_psid], rx_mask, false)?,
+                "cycle {cycle}: the temporary grant must be gone"
+            );
+        }
+    }
+
     Ok(())
 }
