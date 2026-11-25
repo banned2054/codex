@@ -11,6 +11,8 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+use windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::HLOCAL;
@@ -1100,15 +1102,40 @@ pub unsafe fn revoke_ace(path: &Path, psid: *mut c_void) -> Result<()> {
 /// Removes the explicit read-deny ACEs added for this SID by `add_deny_read_ace`.
 /// Keeps inherited ACEs, grants and denies for other masks or SIDs.
 ///
+/// A target that is confirmed gone carries no ACE to remove, so opening it and
+/// getting exactly `ERROR_FILE_NOT_FOUND` or `ERROR_PATH_NOT_FOUND` reports
+/// success. No other failure is treated that way: a target that exists but
+/// cannot be opened or updated may still hold its deny ACE, so those errors are
+/// returned with the path instead of letting the caller forget the entry.
+///
 /// # Safety
 /// Caller must pass a valid SID pointer and own the read-deny entries at `path`.
 pub(crate) unsafe fn revoke_read_deny_aces(path: &Path, psid: *mut c_void) -> Result<()> {
-    let handle = OpenOptions::new()
+    let handle = match OpenOptions::new()
         .access_mode(READ_CONTROL | WRITE_DAC)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
-        .with_context(|| format!("open stale read-deny ACL target {}", path.display()))?;
+    {
+        Ok(handle) => handle,
+        // Match the raw codes only. `ErrorKind::NotFound` also covers a missing
+        // drive and unreachable network locations, none of which proves the
+        // deny ACE is gone.
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(code)
+                    if code == ERROR_FILE_NOT_FOUND as i32
+                        || code == ERROR_PATH_NOT_FOUND as i32
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("open stale read-deny ACL target {}", path.display()));
+        }
+    };
     ensure_handle_is_not_filesystem_root(&handle, path)?;
     let (dacl, descriptor) = read_file_dacl(&handle, path)?;
     let result = (|| -> Result<()> {

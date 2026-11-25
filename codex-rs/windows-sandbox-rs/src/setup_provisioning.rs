@@ -597,15 +597,7 @@ fn run_payload(payload: &Payload) -> Result<()> {
     if let Err(err) = &result {
         let _ = log_line(&mut log, &format!("setup error: {err:?}"));
         log_note(&format!("setup error: {err:?}"), Some(sbx_dir.as_path()));
-        let failure = extract_setup_failure(err)
-            .map(|f| SetupFailure::new(f.code, f.message.clone()))
-            .unwrap_or_else(|| {
-                SetupFailure::new(SetupErrorCode::HelperUnknownError, err.to_string())
-            });
-        let report = SetupErrorReport {
-            code: failure.code,
-            message: failure.message,
-        };
+        let report = error_report(err);
         let write_report = match payload.mode {
             SetupMode::ProvisionOnly => serde_json::to_vec_pretty(&report)
                 .map_err(anyhow::Error::from)
@@ -628,6 +620,24 @@ fn run_payload(payload: &Payload) -> Result<()> {
         }
     }
     result
+}
+
+/// Builds the report the host reads from `setup_error.json` after a failed setup.
+///
+/// A structured failure keeps its own code and message. Any other error becomes
+/// `HelperUnknownError` carrying its complete `anyhow` chain: the host shows
+/// only this message, so every stage and path down to the OS error must be in
+/// it rather than just the outermost context.
+fn error_report(err: &anyhow::Error) -> SetupErrorReport {
+    let failure = extract_setup_failure(err)
+        .map(|f| SetupFailure::new(f.code, f.message.clone()))
+        .unwrap_or_else(|| {
+            SetupFailure::new(SetupErrorCode::HelperUnknownError, format!("{err:#}"))
+        });
+    SetupErrorReport {
+        code: failure.code,
+        message: failure.message,
+    }
 }
 
 /// Refuses approved-read requests that fail the trusted protected-path checks.
@@ -1542,6 +1552,7 @@ mod tests {
     use crate::path_mask_allows;
     use crate::path_write_aces_need_refresh;
     use crate::workspace_write_cap_sid_for_root;
+    use anyhow::Context;
     use codex_otel::StatsigMetricsSettings;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -1823,6 +1834,31 @@ mod tests {
         .expect("deny sids");
 
         assert_eq!(deny_sids, vec![workspace_sid, nested_sid]);
+    }
+
+    #[test]
+    fn error_report_keeps_every_stage_and_path_of_an_unstructured_error() {
+        let stale = r"C:\profile\old\stuck";
+        let sid = "S-1-5-21-10-20-30-44";
+        let access_denied = std::io::Error::from_raw_os_error(5);
+        // The layers run_setup_full gets back when an existing deny target
+        // refuses READ_CONTROL|WRITE_DAC.
+        let error = Err::<(), _>(std::io::Error::from_raw_os_error(5))
+            .with_context(|| format!("open stale read-deny ACL target {stale}"))
+            .with_context(|| format!("revoke stale ACE for {sid} at {stale}"))
+            .context("apply deny-read ACLs")
+            .unwrap_err();
+
+        let report = super::error_report(&error);
+
+        assert_eq!(report.code, crate::SetupErrorCode::HelperUnknownError);
+        assert_eq!(
+            report.message,
+            format!(
+                "apply deny-read ACLs: revoke stale ACE for {sid} at {stale}: \
+                 open stale read-deny ACL target {stale}: {access_denied}"
+            )
+        );
     }
 }
 

@@ -501,3 +501,181 @@ fn revocation_failure_propagates_and_keeps_bookkeeping_for_retry() -> Result<()>
     assert!(stored.principals.is_empty());
     Ok(())
 }
+
+fn has_read_deny(path: &Path, psid: *mut c_void) -> Result<bool> {
+    unsafe {
+        let (dacl, descriptor) = crate::acl::fetch_dacl_handle(path)?;
+        let denied = crate::acl::dacl_has_read_deny_for_sid(dacl, psid);
+        win::LocalFree(descriptor as win::HLOCAL);
+        Ok(denied)
+    }
+}
+
+/// Marks a file for deletion while keeping its name: it stays on disk with its
+/// ACL until the returned handle is dropped, but nothing else can open it.
+fn mark_delete_pending(path: &Path) -> Result<File> {
+    let handle = OpenOptions::new()
+        .access_mode(winfs::DELETE)
+        .share_mode(winfs::FILE_SHARE_READ | winfs::FILE_SHARE_WRITE | winfs::FILE_SHARE_DELETE)
+        .open(path)?;
+    let information = winfs::FILE_DISPOSITION_INFO { DeleteFile: true };
+    assert_ne!(
+        unsafe {
+            winfs::SetFileInformationByHandle(
+                handle.as_raw_handle() as win::HANDLE,
+                winfs::FileDispositionInfo,
+                &information as *const _ as *const c_void,
+                std::mem::size_of_val(&information) as u32,
+            )
+        },
+        0,
+        "mark {} for deletion: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
+    Ok(handle)
+}
+
+/// Unlike the approved-read grant above, a read deny cannot outlive its target:
+/// a stale entry whose target is gone is already clean. The sync succeeds,
+/// keeps revoking the entries after it, and forgets the entry.
+#[test]
+fn stale_deny_for_deleted_target_file_is_dropped_from_bookkeeping() -> Result<()> {
+    let temp = TempDir::new()?;
+    let state_dir = sandbox_dir(temp.path());
+    fs::create_dir(&state_dir)?;
+    let path = state_dir.join(DENY_READ_ACL_STATE_FILE);
+    let sid_string = "S-1-5-21-10-20-30-44";
+    let sid = LocalSid::from_string(sid_string)?;
+    let deleted = temp.path().join("deleted");
+    let leftover = temp.path().join("leftover");
+    let current = temp.path().join("current");
+    fs::write(&deleted, b"secret")?;
+    fs::create_dir(&leftover)?;
+    fs::create_dir(&current)?;
+    let previous = [deleted.clone(), leftover.clone(), current.clone()];
+    unsafe { sync_persistent_deny_read_acls(temp.path(), sid_string, &previous, sid.as_ptr()) }?;
+    assert_eq!(load_state(&path)?.principals[sid_string], previous);
+
+    fs::remove_file(&deleted)?;
+    assert_eq!(
+        File::open(&deleted)
+            .expect_err("target is gone")
+            .raw_os_error(),
+        Some(win::ERROR_FILE_NOT_FOUND as i32)
+    );
+
+    // The missing target ends its own entry; the sync must still reach `leftover`.
+    let applied = unsafe {
+        sync_persistent_deny_read_acls(
+            temp.path(),
+            sid_string,
+            std::slice::from_ref(&current),
+            sid.as_ptr(),
+        )
+    }?;
+    assert_eq!(applied, vec![current.clone()]);
+    assert!(!has_read_deny(&leftover, sid.as_ptr())?);
+    assert!(has_read_deny(&current, sid.as_ptr())?);
+    assert_eq!(
+        load_state(&path)?.principals,
+        BTreeMap::from([(sid_string.to_owned(), vec![current])])
+    );
+    Ok(())
+}
+
+/// Entries below a parent directory that no longer exists are cleaned the same way.
+#[test]
+fn stale_deny_for_deleted_parent_directory_is_dropped_from_bookkeeping() -> Result<()> {
+    let temp = TempDir::new()?;
+    let state_dir = sandbox_dir(temp.path());
+    fs::create_dir(&state_dir)?;
+    let path = state_dir.join(DENY_READ_ACL_STATE_FILE);
+    let sid_string = "S-1-5-21-10-20-30-45";
+    let sid = LocalSid::from_string(sid_string)?;
+    let parent = temp.path().join("deleted-parent");
+    let first = parent.join("first");
+    let second = parent.join("second");
+    fs::create_dir_all(&first)?;
+    fs::create_dir_all(&second)?;
+    let previous = [first, second.clone()];
+    unsafe { sync_persistent_deny_read_acls(temp.path(), sid_string, &previous, sid.as_ptr()) }?;
+    assert_eq!(load_state(&path)?.principals[sid_string], previous);
+
+    fs::remove_dir_all(&parent)?;
+    assert_eq!(
+        File::open(&second)
+            .expect_err("parent is gone")
+            .raw_os_error(),
+        Some(win::ERROR_PATH_NOT_FOUND as i32)
+    );
+
+    assert!(
+        unsafe { sync_persistent_deny_read_acls(temp.path(), sid_string, &[], sid.as_ptr()) }?
+            .is_empty()
+    );
+    assert!(load_state(&path)?.principals.is_empty());
+    Ok(())
+}
+
+/// A target that still exists but cannot be opened may still carry its deny ACE:
+/// the sync must fail with the stage and path, keep the entry, and converge once
+/// the target is gone.
+#[test]
+fn stale_deny_for_unopenable_target_fails_and_keeps_bookkeeping() -> Result<()> {
+    let temp = TempDir::new()?;
+    let state_dir = sandbox_dir(temp.path());
+    fs::create_dir(&state_dir)?;
+    let path = state_dir.join(DENY_READ_ACL_STATE_FILE);
+    let sid_string = "S-1-5-21-10-20-30-46";
+    let sid = LocalSid::from_string(sid_string)?;
+    let stale = temp.path().join("stale");
+    fs::write(&stale, b"secret")?;
+    let applied = unsafe {
+        sync_persistent_deny_read_acls(
+            temp.path(),
+            sid_string,
+            std::slice::from_ref(&stale),
+            sid.as_ptr(),
+        )
+    }?;
+    assert_eq!(applied, vec![stale.clone()]);
+
+    // The file is still on disk with its ACE, but every other open is denied.
+    let holder = mark_delete_pending(&stale)?;
+    assert_eq!(
+        File::open(&stale)
+            .expect_err("target cannot be opened")
+            .raw_os_error(),
+        Some(win::ERROR_ACCESS_DENIED as i32)
+    );
+    let error =
+        unsafe { sync_persistent_deny_read_acls(temp.path(), sid_string, &[], sid.as_ptr()) }
+            .expect_err("an unopenable target must not be reported as revoked");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains(&format!(
+            "revoke stale ACE for {sid_string} at {}: open stale read-deny ACL target {}: ",
+            stale.display(),
+            stale.display()
+        )),
+        "unexpected error: {error}"
+    );
+    assert!(error.contains("(os error 5)"), "unexpected error: {error}");
+    let stored: PersistentDenyReadAclState = serde_json::from_slice(&fs::read(&path)?)?;
+    assert_eq!(
+        stored.principals[sid_string],
+        vec![stale],
+        "bookkeeping must survive a failed revocation"
+    );
+
+    // Releasing the holder completes the deletion; the retry then converges.
+    drop(holder);
+    assert!(
+        unsafe { sync_persistent_deny_read_acls(temp.path(), sid_string, &[], sid.as_ptr()) }?
+            .is_empty()
+    );
+    let stored: PersistentDenyReadAclState = serde_json::from_slice(&fs::read(&path)?)?;
+    assert!(stored.principals.is_empty());
+    Ok(())
+}

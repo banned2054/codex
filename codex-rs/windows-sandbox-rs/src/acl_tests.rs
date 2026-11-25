@@ -1,4 +1,5 @@
 use super::acl_api_result;
+use super::dacl_has_read_deny_for_sid;
 use super::deny_ace_already_present;
 use super::ensure_allow_mask_aces_with_inheritance;
 use super::ensure_handle_is_not_filesystem_root;
@@ -11,6 +12,9 @@ use std::fs::OpenOptions;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+use windows_sys::Win32::Foundation::ERROR_INVALID_NAME;
+use windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND;
 use windows_sys::Win32::Foundation::HLOCAL;
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
@@ -194,4 +198,64 @@ fn noninheriting_read_attributes_preserve_unprotected_child_dacl() {
         .unwrap()
     });
     assert_eq!(acl_snapshot(&child), before);
+}
+
+/// Revoking read denies treats only the two raw "not found" codes as a target
+/// that is already clean. A live target still loses its deny, and any other
+/// open failure keeps its stage and path.
+#[test]
+fn read_deny_revocation_treats_only_not_found_codes_as_cleaned() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let live = temp.path().join("live");
+    std::fs::write(&live, b"stale").expect("live target");
+    let sid = LocalSid::from_string("S-1-5-21-10-20-30-44").expect("test SID");
+    let psid = sid.as_ptr();
+    let has_read_deny = |path: &Path| unsafe {
+        let (dacl, descriptor) = fetch_dacl_handle(path).expect("read target ACL");
+        let denied = dacl_has_read_deny_for_sid(dacl, psid);
+        LocalFree(descriptor as HLOCAL);
+        denied
+    };
+
+    unsafe {
+        assert!(super::add_deny_read_ace(&live, psid).expect("add read deny"));
+        assert!(has_read_deny(&live));
+        super::revoke_read_deny_aces(&live, psid).expect("revoke from a live target");
+        assert!(!has_read_deny(&live));
+    }
+
+    // Pin the raw code each gone-target shape produces before relying on it.
+    for (path, code) in [
+        (temp.path().join("deleted-file"), ERROR_FILE_NOT_FOUND),
+        (
+            temp.path().join("deleted-parent").join("deleted-file"),
+            ERROR_PATH_NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            std::fs::File::open(&path)
+                .expect_err("target is gone")
+                .raw_os_error(),
+            Some(code as i32),
+            "unexpected failure for {}",
+            path.display()
+        );
+        unsafe { super::revoke_read_deny_aces(&path, psid) }
+            .expect("a target that is gone is already clean");
+    }
+
+    // A name the filesystem rejects says nothing about whether a target exists.
+    let rejected = temp.path().join("rejected<name");
+    let open_error = std::fs::File::open(&rejected).expect_err("name is rejected");
+    assert_eq!(open_error.raw_os_error(), Some(ERROR_INVALID_NAME as i32));
+    let error = unsafe { super::revoke_read_deny_aces(&rejected, psid) }
+        .expect_err("a rejected name must not look like a clean target");
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "open stale read-deny ACL target {}: {}",
+            rejected.display(),
+            open_error
+        )
+    );
 }
